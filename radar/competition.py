@@ -159,6 +159,10 @@ def assess(rows: list[dict], cfg: dict, state: Path) -> tuple[int, list[str]]:
             kinds[x["kind"]] = kinds.get(x["kind"], 0) + 1
         r["competition"] = {"verdict": verdict(weak, kd), "weak": weak, "kd": kd, "ads": p["ads"],
                             "kinds": kinds, "features": p["features"],
+                            # raw page-one rows — downstream (hintprobe ingest) persists
+                            # them as serp_results evidence; dropping them here would
+                            # leave only the verdict with nothing to audit it against
+                            "results": rated,
                             "weakest": {k: weakest[k] for k in ("domain", "dr", "position", "url")} if weakest else None}
         if r["decision"] == "prioritize" and r["competition"]["verdict"] == "crowded":
             r["decision"], r["demoted"] = "watch", True
