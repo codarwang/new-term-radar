@@ -566,7 +566,7 @@ def _fake_usecase_network(monkeypatch):
          "nobody searches this": {"volume": 0, "month": ""}}, 90000))
     monkeypatch.setattr(usecases, "fetch_series", lambda keywords, bench, today: (
         {k: {"solo": rise if k == "synthid detector" else flat,
-             "pair": [(d, v, 40) for d, v in (rise if k == "synthid detector" else flat)]} for k in keywords}, 7200))
+             "pair": [(d, v, 40) for d, v in (rise if k == "synthid detector" else flat)]} for k in keywords}, 7200, []))
 
 
 def test_usecases_run_builds_one_table_and_reads_a_name_twice(cfg, tmp_path, monkeypatch):

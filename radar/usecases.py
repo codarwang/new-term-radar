@@ -434,16 +434,29 @@ def _pairs(task: dict) -> list[tuple[date, int, int]]:
     return rows
 
 
-def fetch_series(keywords: list[str], benchmark: str, today: date) -> tuple[dict[str, dict], int]:
-    """{keyword: {"solo": [(day, value)], "pair": [(day, value, benchmark value)]}}: two Trends lookups each."""
+def fetch_series(keywords: list[str], benchmark: str, today: date) -> tuple[dict[str, dict], int, list[str]]:
+    """({keyword: {"solo": [(day, value)], "pair": [(day, value, benchmark value)]}}, cost_micros, errors):
+    two Trends lookups each; a keyword whose request fails (e.g. no curve →
+    provider ok:false) is skipped and named in errors instead of sinking the batch."""
     window = {"date_from": (today - timedelta(days=TRENDS_DAYS)).isoformat(), "date_to": today.isoformat()}
-    calls = []
-    for i, k in enumerate(keywords):
-        calls.append({"call_id": f"s{i}", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k], **window}]}})
-        calls.append({"call_id": f"p{i}", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k, benchmark], **window}]}})
-    data, cost = aisa.call_all(calls)
-    task = lambda cid: ((data.get(cid) or {}).get("tasks") or [{}])[0]  # noqa: E731
-    return {k: {"solo": review._series(task(f"s{i}")), "pair": _pairs(task(f"p{i}"))} for i, k in enumerate(keywords)}, cost
+    out, cost, errors = {}, 0, []
+    for k in keywords:
+        calls = [
+            {"call_id": "s", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k], **window}]}},
+            {"call_id": "p", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k, benchmark], **window}]}},
+        ]
+        try:
+            data, c = aisa.call_all(calls)
+        except aisa.AisaError as exc:
+            # a word with no Trends curve fails its whole request (the provider
+            # answers ok:false and refunds the credits): that word is honestly
+            # "no data" — skip it, don't sink the other keywords' series with it
+            errors.append(f"{k}: {' '.join(str(exc).split())}")
+            continue
+        cost += c
+        task = lambda cid: ((data.get(cid) or {}).get("tasks") or [{}])[0]  # noqa: E731
+        out[k] = {"solo": review._series(task("s")), "pair": _pairs(task("p"))}
+    return out, cost, errors
 
 
 def measure(rows: list[dict], series: dict[str, dict], min_daily: int, today: date,
@@ -520,7 +533,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
     generic = sorted((dict(r, **vol[p]) for p, r in proposed.items() if vol.get(p, {}).get("volume", 0) >= c["min_volume"]),
                      key=lambda r: -r["volume"])[:c["trends_max"]]
     rows = [{"term": n, "phrase": n, "kind": "name", "names": [], "brand": True, "evidence": "", **vol.get(n, {})} for n in todo] + generic
-    series, c3 = fetch_series([r["phrase"] for r in rows], bench, today)
+    series, c3, series_errors = fetch_series([r["phrase"] for r in rows], bench, today)
     local, c4, local_errors = country_series(rows, c) if goanyapi.key() and c.get("country_trends", True) else ({}, 0, [])
     daily = measure(rows, series, c["min_daily"], today, local)
     c5, comp_errors = competition.assess(rows, cfg, state) if cfg.get("competition", {}).get("max_rows") else (0, [])
@@ -538,6 +551,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
             "posts_error": "; ".join(f"{n}: {e['error']}" for n, e in ev.items() if e.get("error")),
             "related": use_related, "tails": {n: v for n, v in tails.items() if v}, "cosearch": cosearch,
             "related_errors": related_errors, "geo": c["related_geo"], "country_errors": local_errors,
+            "series_errors": series_errors,
             "competition_errors": comp_errors, "cost_micros": cost + c0 + c2 + c3 + c4 + c5}
 
 
@@ -561,4 +575,5 @@ def names_to_read(leads_today: list[dict], recent_sources: list[dict]) -> list[s
 
 def degraded(uc: dict) -> bool:
     """A source failed during this run, so the table holds less than it would have."""
-    return bool(uc.get("posts_error") or uc.get("related_errors") or uc.get("country_errors") or uc.get("competition_errors"))
+    return bool(uc.get("posts_error") or uc.get("related_errors") or uc.get("country_errors")
+                or uc.get("series_errors") or uc.get("competition_errors"))

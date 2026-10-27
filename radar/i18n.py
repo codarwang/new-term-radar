@@ -166,6 +166,7 @@ T = {
     "uc_geo_note": ("({geo}) = the curve was read from 30 days of daily data for that country (GoAnyAPI), settled to yesterday; a rise there is 1.5x the earlier level for three days. The other rows use the worldwide series.",
                     "({geo}) = 走势读自这个国家的 30 天日数据(GoAnyAPI),结算到昨天;在这份数据里,比之前高 50% 且持续三天算上涨。其余行用的是全球数据。"),
     "uc_geo_err": ("Country series failed, worldwide data used instead: {names}.", "国家数据获取失败,已退回全球数据:{names}。"),
+    "uc_series_err": ("Trends series failed for: {names}.", "搜索趋势曲线获取失败:{names}。"),
     "uc_said_h": ("What people said (the evidence for each generic term):", "原话(每个通用词的依据):"),
     "uc_none": ("Nothing to read today: no new name, and none due for its second reading.", "今天没有要读的名字:没有新名字,也没有到第二次阅读时间的。"),
     "uc_no_evidence": ("No posts or README found for: {names}.", "没找到帖子或 README:{names}。"),
