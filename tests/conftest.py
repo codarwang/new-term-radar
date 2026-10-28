@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from radar import aisa, config, goanyapi, i18n
+from radar import aisa, config, goanyapi, i18n, webtool
 
 
 @pytest.fixture(autouse=True)
@@ -13,6 +13,12 @@ def english(monkeypatch):
     def no_network(*a, **k):
         raise goanyapi.GoAnyError("no network in tests")
     monkeypatch.setattr(goanyapi, "call", no_network)
+
+    def no_webtool(*a, **k):
+        raise webtool.WebToolError("no network in tests")
+    monkeypatch.setattr(webtool, "_request", no_webtool)
+    monkeypatch.setattr(webtool, "_ego_request", no_webtool)
+    monkeypatch.setattr(webtool, "_use_ego", lambda: False)
 
     def no_paid_calls(*a, **k):       # a key on the machine must never turn a test into a paid call
         raise aisa.AisaError("no network in tests")

@@ -644,9 +644,8 @@ def test_screen_marks_brands_and_other_names(monkeypatch):
 
 def test_with_a_key_related_queries_join_the_table_and_other_names_become_leads(cfg, tmp_path, monkeypatch):
     _fake_usecase_network(monkeypatch)
-    monkeypatch.setenv("GOANYAPI_API_KEY", "k")
-    monkeypatch.setattr(usecases.goanyapi, "related_queries", lambda name, geo: (
-        {"rising": ["ai photo detector", "gpt image 2.5", "synthid detector online"], "top": []}, 6000))
+    monkeypatch.setattr(usecases.webtool, "related_queries", lambda name, geo:
+        {"rising": ["ai photo detector", "gpt image 2.5", "synthid detector online"], "top": []})
     monkeypatch.setattr(usecases, "screen", lambda model, name, ev, cands: [
         dict(c, relevance=0.9, is_name=c["phrase"] == "gpt image 2.5") for c in cands])
     monkeypatch.setattr(usecases, "volumes", lambda phrases, loc: (
@@ -656,25 +655,22 @@ def test_with_a_key_related_queries_join_the_table_and_other_names_become_leads(
     rows = {r["phrase"]: r for r in uc["rows"]}
     assert rows["ai photo detector"]["source"] == "searched" and "gpt image 2.5" not in rows
     assert uc["cosearch"] == [{"term": "gpt image 2.5", "with": "synthid detector"}]
-    assert uc["tails"] == {"synthid detector": ["synthid detector online"]} and uc["cost_micros"] == 106200
+    assert uc["tails"] == {"synthid detector": ["synthid detector online"]} and uc["cost_micros"] == 100200
     text = "\n".join(report.keyword_table(cfg, uc))
     assert "| **ai photo detector** 🖼 🔎 |" in text and "gpt image 2.5 (with synthid detector)" in text and "synthid detector online" in text
     assert "incomplete today" not in text
     assert {"term": "gpt image 2.5", "kinds": ["cosearch"]}.items() <= report.usecase_leads(uc)[-1].items()
 
 
-def test_without_a_key_the_table_says_the_source_is_off_and_a_failure_is_reported(cfg, tmp_path, monkeypatch):
+def test_related_failure_is_reported_and_the_table_still_builds(cfg, tmp_path, monkeypatch):
     _fake_usecase_network(monkeypatch)
-    uc = usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY)
-    assert not uc["related"] and "GOANYAPI_API_KEY" in "\n".join(report.keyword_table(cfg, uc))
-    monkeypatch.setenv("GOANYAPI_API_KEY", "k")
 
     def down(name, geo):
-        raise usecases.goanyapi.GoAnyError("HTTP 502")
-    monkeypatch.setattr(usecases.goanyapi, "related_queries", down)
+        raise usecases.webtool.WebToolError("HTTP 502")
+    monkeypatch.setattr(usecases.webtool, "related_queries", down)
     cfg["usecases"]["country_trends"] = False
     uc = usecases.run(cfg, tmp_path / "b", ["synthid detector"], {}, TODAY)
-    assert uc["related_errors"] == ["synthid detector: HTTP 502"] and uc["kept"] == 2
+    assert uc["related"] and uc["related_errors"] == ["synthid detector: HTTP 502"] and uc["kept"] == 2
     assert "HTTP 502" in "\n".join(report.keyword_table(cfg, uc))
 
 
@@ -693,9 +689,9 @@ def test_every_name_gets_the_country_series_and_the_cap_is_on_generic_terms(cfg,
            [{"phrase": f"g{v}", "kind": "generic", "volume": v} for v in (27100, 22200, 8100, 6600, 900)]
     cfg["usecases"]["country_max"] = 3
     asked = []
-    monkeypatch.setattr(usecases.goanyapi, "daily_series", lambda term, geo: (asked.append(term) or [(TODAY, 1)], 6000))
+    monkeypatch.setattr(usecases.webtool, "series", lambda kw, geo, range: asked.append(kw) or [(TODAY, 1)])
     out, cost, errors = usecases.country_series(rows, cfg["usecases"])
-    assert sorted(asked) == sorted([f"name{i}" for i in range(5)] + ["g27100", "g22200", "g8100"]) and cost == 48000 and not errors
+    assert sorted(asked) == sorted([f"name{i}" for i in range(5)] + ["g27100", "g22200", "g8100"]) and cost == 0 and not errors
 
 
 def test_other_names_must_be_rising_and_not_the_same_family():
@@ -724,17 +720,16 @@ def test_a_flat_country_series_stays_flat():
 
 def test_names_and_big_generic_terms_take_their_shape_from_the_country(cfg, tmp_path, monkeypatch):
     _fake_usecase_network(monkeypatch)
-    monkeypatch.setenv("GOANYAPI_API_KEY", "k")
     cfg["usecases"]["related"] = False
     up = _month([50] * 24 + [77, 86, 83, 100, 94, 79])
     asked = []
 
-    def daily_series(term, geo):
-        asked.append(term)
-        if term == "synthid detector":
-            raise usecases.goanyapi.GoAnyError("HTTP 502")
-        return up, 6000
-    monkeypatch.setattr(usecases.goanyapi, "daily_series", daily_series)
+    def series(kw, geo, range):
+        asked.append(kw)
+        if kw == "synthid detector":
+            raise usecases.webtool.WebToolError("HTTP 502")
+        return up
+    monkeypatch.setattr(usecases.webtool, "series", series)
     uc = usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY)
     rows = {r["phrase"]: r for r in uc["rows"]}
     # The lookups run three at a time, so the order they are recorded in is the threads' own.
@@ -747,16 +742,11 @@ def test_names_and_big_generic_terms_take_their_shape_from_the_country(cfg, tmp_
     assert "This table is incomplete today" in text
 
 
-def test_small_generic_terms_are_not_worth_a_country_lookup(cfg):
+def test_small_generic_terms_are_not_worth_a_country_lookup(cfg, monkeypatch):
     rows = [{"phrase": "a", "kind": "generic", "volume": 300}, {"phrase": "b", "kind": "generic", "volume": 5000}, {"phrase": "n", "kind": "name"}]
     asked = []
-    import radar.goanyapi as g
-    orig = g.daily_series
-    g.daily_series = lambda term, geo: (asked.append(term) or [], 0)
-    try:
-        usecases.country_series(rows, cfg["usecases"])
-    finally:
-        g.daily_series = orig
+    monkeypatch.setattr(usecases.webtool, "series", lambda kw, geo, range: asked.append(kw) or [])
+    usecases.country_series(rows, cfg["usecases"])
     assert asked == ["n", "b"]
 
 
@@ -914,9 +904,41 @@ def test_page_one_verdicts():
     assert competition.page_kind("headshots.com", "https://headshots.com/best", "16 Best AI Headshot Generators") == "list"
 
 
+def test_the_free_audit_lane_demotes_crowded_and_marks_its_source(cfg, tmp_path, monkeypatch):
+    """_assess_web: one webtool.kd() call carries the whole audit — page-1 rows
+    with inline DR, volume backfill, link budget — at zero reported cost."""
+    cfg["competition"]["max_rows"] = 8
+
+    def kd(keyword, gl):
+        strong = [{"position": 1, "domain": "canva.com", "url": "https://canva.com/ai", "title": "Canva AI",
+                   "page_type": "内页", "is_homepage": False, "dr": 94, "visits": 9_000_000, "kw_hit": False, "strength": 90},
+                  {"position": 2, "domain": "adobe.com", "url": "https://adobe.com/x", "title": "Adobe",
+                   "page_type": "内页", "is_homepage": False, "dr": 96, "visits": 400_000_000, "kw_hit": False, "strength": 95}]
+        results = strong + ([{"position": i + 3, "domain": f"tiny{i}.ai", "url": f"https://tiny{i}.ai/",
+                             "title": "Free Tool", "page_type": "首页", "is_homepage": True, "dr": d,
+                             "visits": 500, "kw_hit": True, "strength": 10}
+                            for i, d in enumerate([8, 12, 21])] if keyword == "open term" else [])
+        return {"keyword": keyword, "score": 60 if keyword == "crowded term" else 25, "level": "中",
+                "volume": 9000, "trend": {}, "link_budget": {"targetDr": 40}, "reasons": ["x"],
+                "type": "generic", "cache_hit": "", "computed_at": 0, "results": results}
+    monkeypatch.setattr(competition.webtool, "kd", kd)
+    rows = [{"phrase": "crowded term", "decision": "prioritize"}, {"phrase": "open term", "decision": "prioritize"},
+            {"phrase": "faded", "decision": "skip"}]
+    cost, errors = competition.assess(rows, cfg, tmp_path)
+    crowded, opened, faded = rows
+    assert cost == 0 and errors == [] and "competition" not in faded
+    assert crowded["decision"] == "watch" and crowded["demoted"] and crowded["competition"]["verdict"] == "crowded"
+    assert crowded["competition"]["source"] == "webcafe_web" and crowded["competition"]["weak"] == 0
+    assert crowded["competition"]["kd"] == 60 and crowded["competition"]["audit_volume"] == 9000
+    assert opened["competition"]["weak"] == 3 and opened["competition"]["built"] == 3   # kw_hit homepages
+    assert opened["competition"]["weakest"] == {"domain": "tiny0.ai", "dr": 8, "position": 3, "url": "https://tiny0.ai/"}
+    assert opened["volume"] == 9000                                                  # free backfill
+
+
 def test_a_crowded_rising_term_is_watched_not_prioritized(cfg, tmp_path, monkeypatch):
     cfg["competition"]["max_rows"] = 8
     monkeypatch.setenv("GOANYAPI_API_KEY", "k")
+    monkeypatch.setenv("RADAR_AUDIT_LANE", "paid")   # this case audits the billed lane
     strong = [("canva.com", "https://canva.com/ai", "Canva AI"), ("adobe.com", "https://adobe.com/x", "Adobe")]
     weak = [("tiny1.ai", "https://tiny1.ai/", "Free Tool"), ("tiny2.ai", "https://tiny2.ai/", "Free Tool"),
             ("tiny3.ai", "https://tiny3.ai/x", "A guide")]

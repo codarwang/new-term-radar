@@ -52,7 +52,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import UA, aisa, competition, goanyapi, review, snap
+from . import UA, aisa, competition, datasrc, goanyapi, review, snap, webtool
+
+
+def _paid_fallback() -> bool:
+    """RADAR_PAID_FALLBACK=1 lets a failed free-lane call retry on the billed
+    providers. Default off: a webtool/queue failure degrades to 'no data'
+    instead of silently spending money — that is the whole point of the lane."""
+    return os.environ.get("RADAR_PAID_FALLBACK") == "1"
 
 POSTS_KEPT = 12
 POST_CHARS = 400
@@ -267,10 +274,13 @@ def relevant(cands: list[dict]) -> list[dict]:
 
 
 def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], int]:
-    """{phrase: {"volume", "month"}} from Google Ads, one batch call."""
+    """{phrase: {"volume", "month"}} from Google Ads, one batch call.
+    Prefers the webcafe provider (2–5分/50 keywords, unified billing) when
+    WEBCAFE_TOKEN is set; the AIsa/DataForSEO route stays as the fallback."""
     if not phrases:
         return {}, 0
-    data, cost = aisa.call([{"call_id": "vol", "tool": VOLUME_TOOL, "arguments": {"body": [{
+    call = datasrc.call if os.environ.get("WEBCAFE_TOKEN", "").strip() else aisa.call
+    data, cost = call([{"call_id": "vol", "tool": VOLUME_TOOL, "arguments": {"body": [{
         "keywords": phrases, "location_code": location_code, "language_code": "en"}]}}])
     out = {}
     for r in ((data.get("vol") or {}).get("tasks") or [{}])[0].get("result") or []:
@@ -345,6 +355,12 @@ def country_series(rows: list[dict], c: dict) -> tuple[dict[str, list], int, lis
     picked = [r["phrase"] for r in rows if r["kind"] == "name"] + [r["phrase"] for r in generic]
 
     def one(phrase: str):
+        try:
+            # free lane: the browser tool's own geo series (30d), settled daily
+            return phrase, (webtool.series(phrase, c["related_geo"], "30d"), 0), ""
+        except webtool.WebToolError as exc:
+            if not (_paid_fallback() and goanyapi.key()):
+                return phrase, ([], 0), str(exc)
         try:
             return phrase, goanyapi.daily_series(phrase, c["related_geo"]), ""
         except goanyapi.GoAnyError as exc:
@@ -441,6 +457,17 @@ def fetch_series(keywords: list[str], benchmark: str, today: date) -> tuple[dict
     window = {"date_from": (today - timedelta(days=TRENDS_DAYS)).isoformat(), "date_to": today.isoformat()}
     out, cost, errors = {}, 0, []
     for k in keywords:
+        try:
+            # free lane: ONE browser-tool call [k, benchmark] returns both series
+            # on a shared 0–100 scale — the two paid Trends calls' twin
+            out[k] = webtool.pair_series(k, benchmark, range="90d", geo="")
+            continue
+        except webtool.WebToolError as exc:
+            if not _paid_fallback():
+                # a word with no curve is honestly "no data" — skip it, don't
+                # sink the other keywords, don't silently start spending
+                errors.append(f"{k}: {' '.join(str(exc).split())}")
+                continue
         calls = [
             {"call_id": "s", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k], **window}]}},
             {"call_id": "p", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k, benchmark], **window}]}},
@@ -508,7 +535,9 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
     tails: dict[str, list[str]] = {}
     cosearch: list[dict] = []
     related_errors: list[str] = []
-    use_related = bool(goanyapi.key()) and c.get("related", True)
+    # the free lane answers related-queries without a key at all; the paid
+    # GoAnyAPI route is a RADAR_PAID_FALLBACK opt-in now, not the default
+    use_related = c.get("related", True)
     for name in todo:
         try:
             cands = [dict(u, source="model") for u in propose(c["model"], name, ev[name])]
@@ -519,10 +548,16 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
             continue
         if use_related:
             try:
-                related, cost_r = goanyapi.related_queries(name, c["related_geo"])
-            except goanyapi.GoAnyError as exc:
+                related, cost_r = webtool.related_queries(name, c["related_geo"]), 0
+            except webtool.WebToolError as exc:
                 related, cost_r = {}, 0
-                related_errors.append(f"{name}: {exc}")
+                if _paid_fallback() and goanyapi.key():
+                    try:
+                        related, cost_r = goanyapi.related_queries(name, c["related_geo"])
+                    except goanyapi.GoAnyError as exc2:
+                        exc = exc2
+                if not related:
+                    related_errors.append(f"{name}: {exc}")
             c0 += cost_r
             tails[name], searched = split_related(name, related)
             have = {u["phrase"] for u in cands}
@@ -542,7 +577,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
                      key=lambda r: -r["volume"])[:c["trends_max"]]
     rows = [{"term": n, "phrase": n, "kind": "name", "names": [], "brand": True, "evidence": "", **vol.get(n, {})} for n in todo] + generic
     series, c3, series_errors = fetch_series([r["phrase"] for r in rows], bench, today)
-    local, c4, local_errors = country_series(rows, c) if goanyapi.key() and c.get("country_trends", True) else ({}, 0, [])
+    local, c4, local_errors = country_series(rows, c) if c.get("country_trends", True) else ({}, 0, [])
     daily = measure(rows, series, c["min_daily"], today, local)
     c5, comp_errors = competition.assess(rows, cfg, state) if cfg.get("competition", {}).get("max_rows") else (0, [])
     order = {"prioritize": 0, "watch": 1, "skip": 2}

@@ -21,12 +21,13 @@ no ratings and only the difficulty speaks. In a name's first week page one is st
 """
 from __future__ import annotations
 
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
-from . import aisa, goanyapi, snap
+from . import aisa, datasrc, goanyapi, snap, webtool
 
 SERP_TOOL = "post_dataforseo_serp_google_organic_live"
 KD_TOOL = "post_dataforseo_labs_google_keyword_overview_live"
@@ -123,6 +124,51 @@ def verdict(weak: int | None, kd: int | None) -> str:
     return "mixed"
 
 
+def _assess_web(picked: list[dict], c: dict) -> list[str]:
+    """Free lane: one webtool.kd() call per term carries the entire audit —
+    page-1 results with inline DR + monthly visits, difficulty score, keyword
+    volume, link budget. Replaces page_one+difficulty+ratings+supply of the
+    paid bundle (~20 GoAnyAPI credits/term). `paid` advertisers is the one
+    signal the web audit does not carry; it stays absent rather than silently
+    falling back to a paid call."""
+    errors = []
+    for r in picked:
+        try:
+            audit = webtool.kd(r["phrase"], datasrc._gl(c["location_code"]))
+        except webtool.PoolExhausted as exc:
+            errors.append(str(exc))
+            break                        # pool is shared — the rest would fail too
+        except webtool.WebToolError as exc:
+            errors.append(f"{r['phrase']}: {exc}")
+            continue
+        rated = [{"domain": x["domain"], "url": x["url"], "title": x["title"],
+                  "position": x["position"], "dr": x["dr"], "visits": x["visits"],
+                  "kind": page_kind(x["domain"], x["url"], x["title"])}
+                 for x in audit["results"]]
+        known = [x for x in rated if x["dr"] is not None]
+        weak = sum(1 for x in known if x["dr"] < c["weak_dr"]) if known else None
+        weakest = min(known, key=lambda x: (x["dr"], x["position"])) if known else None
+        kd = round(audit["score"]) if isinstance(audit.get("score"), (int, float)) else None
+        kinds = {}
+        for x in rated:
+            kinds[x["kind"]] = kinds.get(x["kind"], 0) + 1
+        r["competition"] = {"verdict": verdict(weak, kd), "weak": weak, "kd": kd,
+                            "ads": None, "kinds": kinds, "features": [],
+                            "results": rated,
+                            "weakest": {k: weakest[k] for k in ("domain", "dr", "position", "url")} if weakest else None,
+                            # kw_hit homepage ≈ someone built a dedicated site on
+                            # the term — the intitle "built" signal's free twin
+                            "built": sum(1 for x in audit["results"] if x.get("kw_hit") and x.get("is_homepage")),
+                            "link_budget": audit["link_budget"], "level": audit["level"],
+                            "audit_volume": audit["volume"], "audit_reasons": audit["reasons"],
+                            "source": "webcafe_web"}
+        if not r.get("volume") and audit.get("volume"):
+            r["volume"] = audit["volume"]     # free volume backfill — costs 0 extra
+        if r["decision"] == "prioritize" and r["competition"]["verdict"] == "crowded":
+            r["decision"], r["demoted"] = "watch", True
+    return errors
+
+
 def assess(rows: list[dict], cfg: dict, state: Path) -> tuple[int, list[str]]:
     """Adds `competition` to the rows that would be acted on and demotes a crowded prioritize. (cost, errors)"""
     c = cfg["competition"]
@@ -130,6 +176,10 @@ def assess(rows: list[dict], cfg: dict, state: Path) -> tuple[int, list[str]]:
     picked = picked[:c["max_rows"]]
     if not picked:
         return 0, []
+    # cost-first: the browser lane is the default; RADAR_AUDIT_LANE=paid opts
+    # back into the billed AIsa/GoAnyAPI path explicitly
+    if os.environ.get("RADAR_AUDIT_LANE", "web") != "paid":
+        return 0, _assess_web(picked, c)
     cost, errors, pages = 0, [], {}
     for r in picked:
         try:
