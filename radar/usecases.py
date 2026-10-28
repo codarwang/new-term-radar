@@ -462,7 +462,9 @@ def fetch_series(keywords: list[str], benchmark: str, today: date) -> tuple[dict
 def measure(rows: list[dict], series: dict[str, dict], min_daily: int, today: date,
             country: dict[str, list] | None = None) -> float | None:
     """Fills each row with its shape, size and decision. Returns the benchmark's calibrated
-    size. A row with a one-country series takes its shape from that (`trend_geo` says so)."""
+    size. A row with a one-country series takes its shape from that (`trend_geo` says so).
+    The fetched daily curves stay on the row as `series` (solo/pair/geo) for downstream
+    persistence — measure only reads them, `_pair` itself is still consumed below."""
     for r in rows:
         r["_pair"] = series.get(r["phrase"], {}).get("pair") or []
     daily = bench_daily(rows)
@@ -474,6 +476,12 @@ def measure(rows: list[dict], series: dict[str, dict], min_daily: int, today: da
             r["trend_geo"] = True
         elif local:
             s = shape(solo, today)
+        r["series"] = {
+            "solo": [[d.isoformat(), v] for d, v in solo],
+            "pair": [[d.isoformat(), v, b] for d, v, b in r["_pair"]],
+        }
+        if local:
+            r["series"]["geo"] = [[d.isoformat(), v] for d, v in local]
         z = size(r.pop("_pair"), today, daily)
         own = own_per_day(solo, r.get("volume", 0), r.get("month", ""), today)
         if own is not None:
