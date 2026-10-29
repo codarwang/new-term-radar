@@ -203,7 +203,7 @@ and from `sources`:
 | `judge` | `model` (any chat model on AIsa) and `min_score` (0.5) |
 | `breakout` | `window_days`, `min_stars`, `velocity_min` (stars a day), `delta_min` (stars since yesterday) |
 | `new_sites` | `queries`: a name and a SQL LIKE pattern on the domain (`"%ai%"`), one paid query each; `weekday` (0 = Monday) |
-| `review` | `after_days` (14) and `per_day` (5 leads a day) |
+| `review` | `after_days` (14) and `per_day` (40 calls a day — local leads first, then the remaining budget pulls D1-side due terms from `$INGEST_URL/api/accuracy-due` when `INGEST_URL`/`INGEST_SECRET` are set; a `remote_attempts` ledger caps retries at 3 with a 30-day lapse) |
 | `usecases` | The keyword table. `per_day` (names read a day, 0 = off), `model`, `benchmark` (the keyword sizes are compared with), `min_volume` (monthly searches a phrase needs), `min_daily` (searches a day for "prioritize"), `recheck_days` (3), `related` (use related queries when `GOANYAPI_API_KEY` is set), `related_geo` (`US`), `country_trends` (read the bigger rows' curves from that country), `country_min_volume` (1000) and `country_max` (8) |
 | `gsc` | `site` (`sc-domain:example.com`) and `token_file`. Leave `{}` to turn the signal off |
 

@@ -603,6 +603,67 @@ def test_review_ignores_the_unsettled_days(cfg, tmp_path, monkeypatch):
     assert review.review(cfg, conn, TODAY)["checked"][0]["verdict"] == "miss"
 
 
+# --- remote due: D1-side calls merged into the review budget -----------------------
+
+def _remote_stub(monkeypatch, items):
+    class Resp:
+        def read(self):
+            return json.dumps({"items": items}).encode()
+    monkeypatch.setattr(review.urllib.request, "urlopen", lambda req, timeout=None: Resp())
+    monkeypatch.setenv("INGEST_URL", "https://x.test")
+    monkeypatch.setenv("INGEST_SECRET", "s")
+
+
+def test_remote_due_merges_filters_and_carries_variants(tmp_path, monkeypatch):
+    conn = store.connect(tmp_path)
+    _remote_stub(monkeypatch, [
+        {"term": "alpha", "first_seen": "2026-10-01", "variants": ["alpha ai", "alpha ai"]},
+        {"term": "beta", "first_seen": "2026-10-02"},          # in `seen` — skipped
+        {"term": "gamma", "first_seen": "not-a-date"},          # bad date — skipped
+        "oops", 42,                                             # non-dict — skipped
+        {"term": 7, "first_seen": "2026-10-03"}])               # non-str term — skipped
+    out = review._remote_due(conn, TODAY, 10, 14, {"beta"})
+    assert [(t, str(f)) for t, f, _ in out] == [("alpha", "2026-10-01")]
+    assert out[0][2] == ["alpha", "alpha ai"]   # term leads its variants, deduped
+
+
+def test_remote_due_caps_attempts_and_resets_after_expiry(tmp_path, monkeypatch):
+    conn = store.connect(tmp_path)
+    conn.execute(review._REMOTE_ATTEMPTS)
+    conn.execute("INSERT INTO remote_attempts VALUES('capped', 3, ?)", (TODAY.isoformat(),))
+    conn.execute("INSERT INTO remote_attempts VALUES('stale', 3, '2026-01-01')")
+    _remote_stub(monkeypatch, [
+        {"term": "capped", "first_seen": "2026-10-01"},   # capped, fresh — skipped
+        {"term": "stale", "first_seen": "2026-10-02"},    # capped but lapsed — eligible
+        {"term": "fresh", "first_seen": "2026-10-03"}])
+    out = review._remote_due(conn, TODAY, 10, 14, set())
+    assert [t for t, _, _ in out] == ["stale", "fresh"]
+
+
+def test_remote_due_fails_soft_without_creds_or_on_fetch_error(tmp_path, monkeypatch):
+    conn = store.connect(tmp_path)
+    monkeypatch.delenv("INGEST_URL", raising=False)
+    monkeypatch.delenv("INGEST_SECRET", raising=False)
+    assert review._remote_due(conn, TODAY, 10, 14, set()) == []
+    monkeypatch.setenv("INGEST_URL", "https://x.test")
+    monkeypatch.setenv("INGEST_SECRET", "s")
+    def boom(req, timeout=None):
+        raise OSError("endpoint down")
+    monkeypatch.setattr(review.urllib.request, "urlopen", boom)
+    assert review._remote_due(conn, TODAY, 10, 14, set()) == []
+
+
+def test_remote_due_survives_a_malformed_payload(tmp_path, monkeypatch):
+    conn = store.connect(tmp_path)
+    monkeypatch.setenv("INGEST_URL", "https://x.test")
+    monkeypatch.setenv("INGEST_SECRET", "s")
+    class Resp:
+        def read(self):
+            return b'{"items": ["oops", 42]}'
+    monkeypatch.setattr(review.urllib.request, "urlopen", lambda req, timeout=None: Resp())
+    assert review._remote_due(conn, TODAY, 10, 14, set()) == []
+
+
 def test_screen_drops_loosely_related_keywords_and_keeps_all_when_the_call_fails(monkeypatch):
     cands = [{"phrase": p, "brand": False} for p in ("ai image detector", "chatgpt alternative", "ai audio detector")]
     ev = {"posts": [{"text": "check if any image is AI generated", "likes": 900, "by": "a"}], "readme": ""}

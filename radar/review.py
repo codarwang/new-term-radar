@@ -35,9 +35,14 @@ TOOL = "post_dataforseo_keywords_trends_explore_live"
 # which reads as a rise. Every reader drops them (settled()).
 UNSETTLED_DAYS = 2
 # a remote call whose checked row the ledger keeps refusing (name no longer
-# resolves to a term) would re-pull forever and burn MAX_VARIANTS Trends tasks
-# a day — attempts are capped once the calls were paid for
+# resolves to a term) would re-pull forever and burn Trends tasks a day —
+# attempts are capped once the calls were paid for. The cap lapses after
+# RESET days so a downstream outage that capped paid-for terms (and terms
+# capped on a ledger bug since fixed) gets retried instead of bricked —
+# capped terms sort first under first_seen ASC and would eventually fill the
+# whole pull window and stall remote review for good.
 MAX_REMOTE_ATTEMPTS = 3
+REMOTE_ATTEMPT_RESET_DAYS = 30
 _REMOTE_ATTEMPTS = """CREATE TABLE IF NOT EXISTS remote_attempts(
   term TEXT PRIMARY KEY,
   attempts INTEGER NOT NULL,
@@ -101,44 +106,57 @@ def plan_calls(due: list[tuple], today: date, after_days: int = 14) -> tuple[lis
     return calls, plan
 
 
-def _remote_due(conn: sqlite3.Connection, room: int, after_days: int, seen: set[str]) -> list[tuple]:
+def _remote_due(conn: sqlite3.Connection, today: date, room: int, after_days: int,
+                seen: set[str]) -> list[tuple]:
     """D1-side calls due for review — terms that entered the corpus via paths
     other than the vendor leads table (webcafe feed, demand sweeps, …). The
     public ledger counts every live term as an open call; this pull is their
-    only path to a verdict. Fail-soft: missing creds or a dead endpoint must
-    not take the local leads review down with it."""
+    only path to a verdict. Fail-soft ALL the way down: anything unexpected —
+    missing creds, dead endpoint, malformed items, a hiccuping sqlite — must
+    degrade to no remote calls, never kill the local leads review."""
     base = os.environ.get("INGEST_URL", "").rstrip("/")
     secret = os.environ.get("INGEST_SECRET", "")
     if not base or not secret or room <= 0:
         return []
-    conn.execute(_REMOTE_ATTEMPTS)
     try:
+        conn.execute(_REMOTE_ATTEMPTS)
         # UA matters: Cloudflare managed rules 403 the default
-        # Python-urllib/x.y signature before the request ever reaches auth
+        # Python-urllib/x.y signature before the request ever reaches auth.
+        # The fetch is capped at the endpoint's own MAX_LIMIT — a future
+        # per_day beyond ~45 would otherwise 400 and silently switch remote
+        # off through the except below.
         req = urllib.request.Request(
-            f"{base}/api/accuracy-due?limit={room * 2 + 10}&after_days={after_days}",
+            f"{base}/api/accuracy-due?limit={min(room * 2 + 10, 100)}&after_days={after_days}",
             headers={"Authorization": f"Bearer {secret}",
                      "User-Agent": "hintprobe-radar/1.0"})
         items = json.loads(urllib.request.urlopen(req, timeout=30).read()).get("items", [])
+        retry_cut = (today - timedelta(days=REMOTE_ATTEMPT_RESET_DAYS)).isoformat()
+        out = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            term = it.get("term")
+            try:
+                fs = date.fromisoformat(str(it.get("first_seen", "")))
+            except ValueError:
+                continue
+            if not isinstance(term, str) or not term or term in seen:
+                continue
+            row = conn.execute("SELECT attempts, last_at FROM remote_attempts WHERE term=?",
+                               (term,)).fetchone()
+            if row and row[0] >= MAX_REMOTE_ATTEMPTS and row[1] >= retry_cut:
+                continue
+            # the term name always leads its own variant list — linked demand
+            # keywords fill the rest of plan_calls' MAX_VARIANTS spread
+            variants = list(dict.fromkeys(
+                [term] + [v for v in it.get("variants", []) if isinstance(v, str)]))
+            seen.add(term)
+            out.append((term, fs, variants))
+            if len(out) >= room:
+                break
+        return out
     except Exception:
         return []
-    out = []
-    for it in items:
-        term = it.get("term")
-        try:
-            fs = date.fromisoformat(str(it.get("first_seen", "")))
-        except ValueError:
-            continue
-        if not term or term in seen:
-            continue
-        row = conn.execute("SELECT attempts FROM remote_attempts WHERE term=?", (term,)).fetchone()
-        if row and row[0] >= MAX_REMOTE_ATTEMPTS:
-            continue
-        seen.add(term)
-        out.append((term, fs, []))
-        if len(out) >= room:
-            break
-    return out
 
 
 def review(cfg: dict, conn: sqlite3.Connection, today: date | None = None) -> dict:
@@ -146,21 +164,27 @@ def review(cfg: dict, conn: sqlite3.Connection, today: date | None = None) -> di
     c = cfg["review"]
     due = store.due(conn, today, c["after_days"], c["per_day"])
     seen = {t for t, _, _ in due}
-    remote = _remote_due(conn, c["per_day"] - len(due), c["after_days"], seen)
+    remote = _remote_due(conn, today, c["per_day"] - len(due), c["after_days"], seen)
     remote_terms = {t for t, _, _ in remote}
     due = due + remote
     if not due:
         return {"checked": [], "cost_micros": 0, "after_days": c["after_days"]}
     calls, plan = plan_calls(due, today, c["after_days"])
     data, cost = aisa.call_all(calls)
+    retry_cut = (today - timedelta(days=REMOTE_ATTEMPT_RESET_DAYS)).isoformat()
     checked = []
     for ids, term, first_seen, keys in plan:
         if term in remote_terms:
             # the Trends calls were already paid for — count the attempt so a
-            # term the ingest side keeps skipping stops re-pulling forever
+            # term the ingest side keeps skipping stops re-pulling forever.
+            # An attempt older than RESET days resets the counter rather than
+            # accreting past the cap.
             conn.execute("INSERT INTO remote_attempts(term, attempts, last_at) VALUES(?, 1, ?) "
-                         "ON CONFLICT(term) DO UPDATE SET attempts = attempts + 1, "
-                         "last_at = excluded.last_at", (term, today.isoformat()))
+                         "ON CONFLICT(term) DO UPDATE SET "
+                         "attempts = CASE WHEN remote_attempts.last_at < ? THEN 1 "
+                         "ELSE remote_attempts.attempts + 1 END, "
+                         "last_at = excluded.last_at",
+                         (term, today.isoformat(), retry_cut))
             conn.commit()
         if not all(cid in data for cid in ids):
             continue   # stays due; the next run takes it again

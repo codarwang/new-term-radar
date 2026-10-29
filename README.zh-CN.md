@@ -198,7 +198,7 @@ python -m radar daily --skip x,hf --out report.md  # 其余全部，每天一次
 | `judge` | `model`（AIsa 上任意对话模型）和 `min_score`（默认 0.5） |
 | `breakout` | `window_days`、`min_stars`、`velocity_min`（每天涨星）、`delta_min`（比昨天多的星） |
 | `new_sites` | `queries`：名称和域名的 SQL LIKE 模式（`"%ai%"`），每个是一次付费查询；`weekday`（0 = 周一） |
-| `review` | `after_days`（14）和 `per_day`（每天复盘 5 条） |
+| `review` | `after_days`（14）和 `per_day`（每天复盘 40 条——本地 leads 优先，剩余额度在设了 `INGEST_URL`/`INGEST_SECRET` 时从 `$INGEST_URL/api/accuracy-due` 拉取 D1 侧到期词；`remote_attempts` 台账封顶 3 次、30 天后失效重试） |
 | `usecases` | 新词表。`per_day`（每天读几个名字，0 = 关闭）、`model`、`benchmark`（用来比规模的基准词）、`min_volume`（写法至少要有的月搜索量）、`min_daily`（判为「优先」所需的日搜）、`recheck_days`（3）、`related`（设了 `GOANYAPI_API_KEY` 时是否用相关查询）、`related_geo`（`US`）、`country_trends`（规模较大的行改读该国数据）、`country_min_volume`（1000）、`country_max`（8） |
 | `gsc` | `site`（`sc-domain:example.com`）和 `token_file`。留 `{}` 即关闭 |
 
