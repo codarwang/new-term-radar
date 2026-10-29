@@ -60,11 +60,11 @@ How it is made (`radar/usecases.py`):
 
 1. **Evidence**: the most-liked posts that mention the name (X advanced search) and, for a repository, its README.
 2. **Phrases**: a model reads the evidence and writes the keyword an ordinary person would type for each job it sees people doing, with a quote that backs it. A phrase built on another product's name ("photoshop alternative") is kept and marked ⚠: demand often hangs on the incumbent, and whether to use someone's brand is your call.
-   With a GoAnyAPI key (optional, below) the radar also takes **Google Trends' related queries** for the name: what people really searched together with it. For SynthID Detector that gave "ai photo detector", "google ai detector" and "ai detector"; these rows carry 🔎. Queries that hold the name are listed as its long-tails ("photocraft download", "nano banana 2.1 vs pro"). Queries that are themselves the names of other rising things ("gpt image 2.5" beside "nano banana 2.1") are kept as leads of their own.
+   On the free web lane the radar also takes **Google Trends' related queries** for the name: what people really searched together with it. For SynthID Detector that gave "ai photo detector", "google ai detector" and "ai detector"; these rows carry 🔎. Queries that hold the name are listed as its long-tails ("photocraft download", "nano banana 2.1 vs pro"). Queries that are themselves the names of other rising things ("gpt image 2.5" beside "nano banana 2.1") are kept as leads of their own.
 3. **Screen**: a second call scores how well the name answers each phrase, marks brands, and spots the names of other things; the loosely related ones are dropped. For Claude Haiku 5.5 it dropped all six proposed ("ai coding assistant", "github copilot alternative"); for SynthID Detector it kept all five.
-4. **Volume**: Google Ads monthly searches for the rest, one batch call. Phrases under `min_volume` are dropped; most are.
+4. **Volume + difficulty + page one**: the free web audit (`webtool.kd` — web.cafe's keyword page over a browser session, zero credits) returns monthly volume, a difficulty score, the page-one results with DR, and a link budget, all in one call per phrase. Phrases under `min_volume` are dropped; most are.
 5. **Trends**, twice per row: the term alone gives the shape (new or not, the day it started rising, the peak, the last week against the week before, what it is doing now); the term beside a benchmark keyword (`gpts` by default) gives the size.
-6. **Page one**, for the rows that would be acted on (eight at most): Google's first page (about $0.002 a keyword), the rating of each site on it (GoAnyAPI, $0.002 a site, kept 30 days) and the keyword difficulty ($0.012 a call). With a GoAnyAPI key also who already builds for the term and who pays for it: the pages Google holds with it in the title from the last month (`pages built`) and the domains running Google ads on it (`advertisers`, from Ads transparency), $0.008 a row. `open` = three or more of the ten results sit on sites rated under 30, or difficulty under 20; `crowded` = none does and difficulty is 40 or more; `mixed` in between. Under the table it names the weakest site on page one, where a new page can get in, and what kinds of pages hold it (tools, lists, articles, videos, forums). Ads on the page mean someone pays for that click.
+6. **Page one**, for the rows that would be acted on (eight at most): the same free audit already fetched in step 4 supplies Google's first page with each site's DR and visits, the difficulty score, and a link budget — zero extra calls (the paid SERP/DR/KD APIs are gone; nothing is paid per row). Homepages carrying the term's words mark who already builds for it (`kw_hit`, the free twin of the old `pages built` intitle count). `open` = three or more of the ten results sit on sites rated under 30, or difficulty under 20; `crowded` = none does and difficulty is 40 or more; `mixed` in between. Under the table it names the weakest site on page one, where a new page can get in, and what kinds of pages hold it (tools, lists, articles, videos, forums).
 
 Searches a day are estimates. A generic term's come from its own Google Ads volume, moved to today along its own Trends curve. The benchmark is then sized from those terms, and a name, which has no volume data yet, is sized against the benchmark.
 
@@ -88,12 +88,12 @@ The table is still written, but it gets thinner, and it says which part is missi
 
 | What happens | What the table loses | The line it prints |
 |---|---|---|
-| No `GOANYAPI_API_KEY` (the default) | The 🔎 rows, each name's long-tails, the other names searched alongside, and the `(US)` readings. Phrases come from the model alone and every curve from the worldwide series, where a real move can read flat | "Related queries are off: set GOANYAPI_API_KEY…" |
-| GoAnyAPI's Trends is down (seen on its first day in use, 2026-10-12) | The same as having no key, for that run | "Related queries failed for: …" and "Country series failed, worldwide data used instead: …" |
-| AIsa's post search fails for a name (timeouts seen twice on 2026-10-13) | That name's posts. A repository still has its README; a model or product without one is left with the related queries only, and with no GoAnyAPI key it gets no generic terms that day | "The post search failed; this run used READMEs and related queries only: …" |
+| The web session has no related queries for a name | The 🔎 rows, the name's long-tails and the other names searched alongside, for that name | "Related queries failed for: …" |
+| The web session's country series fails for a row | That row's `(US)` reading — the worldwide series is used instead | "Country series failed, worldwide data used instead: …" |
+| AIsa's post search fails for a name (timeouts seen twice on 2026-10-13) | That name's posts. A repository still has its README; a model or product without one is left with the related queries only | "The post search failed; this run used READMEs and related queries only: …" |
 | Neither posts nor a README for a name | Its generic terms; the name's own row stays | "No posts or README found for: …" |
 | No lead that day is a thing with a name score of 0.8 or more | The whole table | "Nothing to read today…" |
-| AIsa's search-volume or Trends lookup fails | The whole table: these two are not replaceable | the error, in place of the table |
+| The free web lane is down or rate-limited (pool exhausted) | The whole table: volume, difficulty and Trends are not replaceable — the run stops with an error instead of falling back to a paid API | the error, in place of the table |
 
 A thin table is not a quiet day. Read the lines under it before you conclude that nothing moved.
 
@@ -127,13 +127,11 @@ A model groups them into gaps (missing, too hard, quality, price, wants a tool),
 
 What it cannot read: App Store, Google Play and Trustpilot reviews (DataForSEO serves them as tasks to post and fetch later, and AIsa runs synchronous calls only); There's An AI For That's request board (a Cloudflare challenge in front of every page; getting past it would be getting past their bot protection, so the radar does not); Facebook groups (Meta closed the Groups API in April 2024, and its research library is open to approved academic and nonprofit researchers only).
 
-## One key, and an optional second
+## One key, plus a browser session
 
-Everything the radar needs goes through [AIsa](https://go.aisa.one/yansen-zhu): X posts, Google Trends and domain data (DataForSEO behind it) and the models that judge names and propose phrases. One key, pay per call, no subscriptions to X's API or DataForSEO.
+Post search and the name/phrase models go through [AIsa](https://go.aisa.one/yansen-zhu) or OpenRouter — one key, pay per call. **Every SEO metric — volume, difficulty, page one, Trends series, related queries — rides the free web lane** (`webtool`, web.cafe's browser-facing tools over an `ego-browser` session or a `WEBCAFE_COOKIE` login). No SEO API is called; if the free lane is down the run stops with an error rather than paying for a fallback.
 
 > That link is a referral link: signing up through it supports this project. The radar works the same with a key from anywhere on aisa.one.
-
-**Optional: `GOANYAPI_API_KEY`** ([goanyapi.com](https://goanyapi.com/r/ga-95708898fb)) improves the keyword table in two ways, for about $0.07 a day: it adds Google Trends' related queries for each name, and it reads the curve of the names and the bigger generic terms (1,000 searches a month or more, eight rows at most) from 30 days of daily data for one country, settled to yesterday. Those rows show the country after "Now", as in `still rising (US)`. Without the key the table is built from the model's phrases and the worldwide series alone. The service is young (first released in August 2026); in our tests calls took 20 to 55 seconds and about one in ten failed, so the radar tries twice, reports a failure in the table and carries on. That link is a referral link too.
 
 Without an AIsa key the free signals still run (Hugging Face, GitHub, sitemaps, Search Console); the report then lists every term unsorted, because nothing judges which are names.
 

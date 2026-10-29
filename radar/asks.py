@@ -99,9 +99,10 @@ def asks(cfg: dict, state: Path, today: date | None = None) -> dict:
         j["score"] += p["score"]
         if p["subreddit"] not in j["subreddits"]:
             j["subreddits"].append(p["subreddit"])
-    vol, spent = usecases.volumes(sorted(jobs), c["location_code"]) if jobs else ({}, 0)
+    vol, spent, vol_errors = usecases.volumes(sorted(jobs), c["location_code"]) if jobs else ({}, 0, [])
     cost += spent
-    rows = sorted((dict(j, volume=vol.get(k, {}).get("volume", 0), decision="watch") for k, j in jobs.items()
+    rows = sorted((dict(j, volume=vol.get(k, {}).get("volume", 0), decision="watch",
+                        _audit=vol.get(k, {}).get("_audit")) for k, j in jobs.items()
                    if vol.get(k, {}).get("volume", 0) >= c["min_volume"]), key=lambda r: (-r["score"], -r["volume"]))[:c["max_leads"]]
     spent, comp_errors = competition.assess(rows, cfg, state) if rows and cfg["competition"]["max_rows"] else (0, [])
     cost += spent
@@ -117,5 +118,7 @@ def asks(cfg: dict, state: Path, today: date | None = None) -> dict:
              for r in rows if not r["again"]]
     quiet = sorted((dict(j, volume=vol.get(k, {}).get("volume", 0)) for k, j in jobs.items()
                     if vol.get(k, {}).get("volume", 0) < c["min_volume"]), key=lambda j: (-len(j["posts"]), -j["score"]))[:c["max_leads"]]   # many askers over one viral thread
+    for r in rows:
+        r.pop("_audit", None)   # raw SERP blob rode the row for assess — not report data
     return {"read": len(posts), "asks": len(kept), "unsized": len(jobs) - len(rows), "rows": rows, "quiet": quiet,
-            "terms": terms, "errors": errors + failed + comp_errors, "cost_micros": cost}
+            "terms": terms, "errors": errors + failed + comp_errors + vol_errors, "cost_micros": cost}

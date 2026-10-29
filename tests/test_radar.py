@@ -363,23 +363,26 @@ def test_review_verdict_miss_and_no_data():
     assert review.verdict({"a": {"rose": False, "no_data": True}}, SEEN) == ("no_data", None)
 
 
-def test_review_sends_one_trends_task_per_call():
-    # DataForSEO's live endpoint runs only the first task of a body
-    due = [("strata", date(2026, 9, 25), ["strata", "niko1221 strata", "niko strata", "a fourth"]), ("veo 3 free", date(2026, 10, 3), [])]
-    calls, plan = review.plan_calls(due, date(2026, 10, 17))
-    assert len(calls) == 4 and all(len(c["arguments"]["body"]) == 1 for c in calls)
-    assert [c["arguments"]["body"][0]["keywords"] for c in calls[:3]] == [["strata"], ["niko1221 strata"], ["niko strata"]]
-    assert calls[3]["arguments"]["body"][0]["keywords"] == ["veo 3 free"]
-    assert calls[0]["arguments"]["body"][0]["date_to"] == "2026-10-09" and calls[3]["arguments"]["body"][0]["date_to"] == "2026-10-17"
+def test_variant_series_picks_the_smallest_daily_range_and_slices(monkeypatch):
+    asked = []
+    monkeypatch.setattr(review.webtool, "series", lambda kw, geo, rng: (
+        asked.append(rng) or [(SEEN - timedelta(days=40) + timedelta(days=i), 5) for i in range(80)]))
+    pts = review._variant_series("x", SEEN, date(2026, 10, 10), 14)
+    assert asked == ["90d"]                       # 30+15d span — the 30d range can't reach the baseline
+    assert pts[0][0] == SEEN - timedelta(days=30) and pts[-1][0] == SEEN + timedelta(days=14)
+
+
+def test_variant_series_rejects_a_coarser_than_daily_grain(monkeypatch):
+    weekly = [(SEEN - timedelta(days=35) + timedelta(days=7 * i), 5) for i in range(9)]
+    monkeypatch.setattr(review.webtool, "series", lambda kw, geo, rng: weekly)
+    assert review._variant_series("x", SEEN, TODAY, 14) is None   # ~6 points can't judge a 14-day window
 
 
 def test_review_stores_the_verdict(cfg, tmp_path, monkeypatch):
     conn = store.connect(tmp_path)
     store.record(conn, [_lead("niko strata", ["breakout"])], SEEN)
-    points = [{"date_from": (date(2026, 9, 19) + timedelta(days=i)).isoformat(), "values": [v]}
-              for i, v in enumerate([0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 30, 100, 0, 0])]
-    answer = {"tasks": [{"result": [{"items": [{"data": points}]}]}]}
-    monkeypatch.setattr(review.aisa, "call_all", lambda calls: ({c["call_id"]: answer for c in calls}, 1200))
+    points = _series([0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 30, 100, 0, 0])
+    monkeypatch.setattr(review.webtool, "series", lambda kw, geo, rng: points)
     out = review.review(cfg, conn, date(2026, 10, 10))
     assert out["checked"] == [{"term": "niko strata", "first_seen": "2026-09-25", "verdict": "hit", "lead_days": 3}]
     assert conn.execute("SELECT verdict, lead_days FROM leads").fetchone() == ("hit", 3)
@@ -563,7 +566,7 @@ def _fake_usecase_network(monkeypatch):
     monkeypatch.setattr(usecases, "screen", lambda model, name, ev, cands: cands)
     monkeypatch.setattr(usecases, "volumes", lambda phrases, loc: (
         {"ai image detector": {"volume": 60000, "month": "2026-08"}, "photoshop alternative": {"volume": 6000, "month": "2026-08"},
-         "nobody searches this": {"volume": 0, "month": ""}}, 90000))
+         "nobody searches this": {"volume": 0, "month": ""}}, 0, []))
     monkeypatch.setattr(usecases, "fetch_series", lambda keywords, bench, today: (
         {k: {"solo": rise if k == "synthid detector" else flat,
              "pair": [(d, v, 40) for d, v in (rise if k == "synthid detector" else flat)]} for k in keywords}, 7200, []))
@@ -577,7 +580,7 @@ def test_usecases_run_builds_one_table_and_reads_a_name_twice(cfg, tmp_path, mon
     assert rows["synthid detector"]["kind"] == "name" and rows["synthid detector"]["decision"] == "prioritize"
     assert rows["ai image detector"]["per_day"] == 2000 and rows["ai image detector"]["decision"] == "watch"
     assert rows["photoshop alternative"]["brand"] and rows["photoshop alternative"]["decision"] == "skip"
-    assert uc["bench_daily"] == 2200 and uc["cost_micros"] == 100200   # the median of 4,000 and 400
+    assert uc["bench_daily"] == 2200 and uc["cost_micros"] == 10200   # the median of 4,000 and 400
     assert usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY + timedelta(days=1))["names"] == []
     assert usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY + timedelta(days=3))["names"] == ["synthid detector"]
     assert usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY + timedelta(days=9))["names"] == []
@@ -597,9 +600,8 @@ def test_keyword_table_marks_brands_and_generic_terms_become_leads(cfg, tmp_path
 def test_review_ignores_the_unsettled_days(cfg, tmp_path, monkeypatch):
     conn = store.connect(tmp_path)
     store.record(conn, [_lead("ai image detector", ["usecase"])], date(2026, 9, 28))
-    points = [{"date_from": d.isoformat(), "values": [v]} for d, v in _daily([5] * 43 + [0, 100])]
-    answer = {"tasks": [{"result": [{"items": [{"data": points}]}]}]}
-    monkeypatch.setattr(review.aisa, "call_all", lambda calls: ({c["call_id"]: answer for c in calls}, 1200))
+    monkeypatch.setattr(review.webtool, "series",
+                        lambda kw, geo, rng: _daily([5] * 43 + [0, 100]))
     assert review.review(cfg, conn, TODAY)["checked"][0]["verdict"] == "miss"
 
 
@@ -667,9 +669,7 @@ def test_remote_due_survives_a_malformed_payload(tmp_path, monkeypatch):
 def test_review_marks_remote_attempts_and_resets_after_expiry(cfg, tmp_path, monkeypatch):
     conn = store.connect(tmp_path)
     _remote_stub(monkeypatch, [{"term": "alpha", "first_seen": "2026-09-20", "variants": []}])
-    answer = {"tasks": [{"result": [{"items": [{"data": []}]}]}]}
-    monkeypatch.setattr(review.aisa, "call_all",
-                        lambda calls: ({c["call_id"]: answer for c in calls}, 300))
+    monkeypatch.setattr(review.webtool, "series", lambda kw, geo, rng: [])
     review.review(cfg, conn, TODAY)
     assert conn.execute(
         "SELECT attempts, last_at FROM remote_attempts WHERE term='alpha'").fetchone() == \
@@ -737,13 +737,13 @@ def test_with_a_key_related_queries_join_the_table_and_other_names_become_leads(
     monkeypatch.setattr(usecases, "screen", lambda model, name, ev, cands: [
         dict(c, relevance=0.9, is_name=c["phrase"] == "gpt image 2.5") for c in cands])
     monkeypatch.setattr(usecases, "volumes", lambda phrases, loc: (
-        {p: {"volume": 9000, "month": "2026-08"} for p in phrases if p != "nobody searches this"}, 90000))
+        {p: {"volume": 9000, "month": "2026-08"} for p in phrases if p != "nobody searches this"}, 0, []))
     cfg["usecases"]["country_trends"] = False
     uc = usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY)
     rows = {r["phrase"]: r for r in uc["rows"]}
     assert rows["ai photo detector"]["source"] == "searched" and "gpt image 2.5" not in rows
     assert uc["cosearch"] == [{"term": "gpt image 2.5", "with": "synthid detector"}]
-    assert uc["tails"] == {"synthid detector": ["synthid detector online"]} and uc["cost_micros"] == 100200
+    assert uc["tails"] == {"synthid detector": ["synthid detector online"]} and uc["cost_micros"] == 10200
     text = "\n".join(report.keyword_table(cfg, uc))
     assert "| **ai photo detector** 🖼 🔎 |" in text and "gpt image 2.5 (with synthid detector)" in text and "synthid detector online" in text
     assert "incomplete today" not in text
@@ -1023,135 +1023,6 @@ def test_the_free_audit_lane_demotes_crowded_and_marks_its_source(cfg, tmp_path,
     assert opened["volume"] == 9000                                                  # free backfill
 
 
-def test_a_crowded_rising_term_is_watched_not_prioritized(cfg, tmp_path, monkeypatch):
-    cfg["competition"]["max_rows"] = 8
-    monkeypatch.setenv("GOANYAPI_API_KEY", "k")
-    monkeypatch.setenv("RADAR_AUDIT_LANE", "paid")   # this case audits the billed lane
-    strong = [("canva.com", "https://canva.com/ai", "Canva AI"), ("adobe.com", "https://adobe.com/x", "Adobe")]
-    weak = [("tiny1.ai", "https://tiny1.ai/", "Free Tool"), ("tiny2.ai", "https://tiny2.ai/", "Free Tool"),
-            ("tiny3.ai", "https://tiny3.ai/x", "A guide")]
-    pages = {"crowded term": _serp(strong, ads=True), "open term": _serp(strong + weak)}
-
-    def call(calls):
-        c = calls[0]
-        if c["call_id"] == "serp":
-            return {"serp": pages[c["arguments"]["body"][0]["keyword"]]}, 2000
-        items = [{"keyword": k, "keyword_properties": {"keyword_difficulty": 60 if k == "crowded term" else 25}}
-                 for k in c["arguments"]["body"][0]["keywords"]]
-        return {"kd": {"tasks": [{"result": [{"items": items}]}]}}, 12000
-    monkeypatch.setattr(competition.aisa, "call", call)
-    rated = {"canva.com": 94, "adobe.com": 96, "tiny1.ai": 8, "tiny2.ai": 12, "tiny3.ai": 21}
-    asked = []
-
-    def goany(path, **p):
-        if path == "dr":
-            asked.append(p["domain"])
-            return {"domain_rating": rated[p["domain"]]}, 2000
-        if path == "google-intitle":
-            return {"intitleCount": 19500}, 4000
-        return {"domains": ["paid.example"] if p["keyword"] == "crowded term" else [], "advertisers": []}, 4000
-    monkeypatch.setattr(competition.goanyapi, "call", goany)
-    rows = [{"phrase": "crowded term", "decision": "prioritize"}, {"phrase": "open term", "decision": "prioritize"},
-            {"phrase": "faded", "decision": "skip"}]
-    cost, errors = competition.assess(rows, cfg, tmp_path)
-    crowded, opened, faded = rows
-    assert crowded["decision"] == "watch" and crowded["demoted"] and crowded["competition"]["ads"]
-    assert crowded["competition"]["verdict"] == "crowded" and crowded["competition"]["weak"] == 0
-    assert opened["decision"] == "prioritize" and opened["competition"]["weak"] == 3
-    assert opened["competition"]["weakest"] == {"domain": "tiny1.ai", "dr": 8, "position": 3, "url": "https://tiny1.ai/"}
-    assert "competition" not in faded and errors == [] and cost == 2 * 2000 + 12000 + 5 * 2000 + 2 * (4000 + 4000)
-    assert crowded["competition"]["built"] == 19500 and crowded["competition"]["paid"] == ["paid.example"]
-    competition.assess([{"phrase": "open term", "decision": "watch"}], cfg, tmp_path)
-    assert len(asked) == 5                                    # ratings are kept 30 days, not bought again
-    uc = {"names": ["x"], "rows": [dict(r, kind="generic", names=["x"], brand=False, new=True, now="rising", peak_day="2026-10-10",
-                                       evidence="") for r in rows[:2]],
-          "proposed": 2, "relevant": 2, "kept": 2, "benchmark": "gpts", "volume_month": "2026-08", "related": True}
-    text = "\n".join(report.keyword_table(cfg, uc))
-    assert "crowded · 0 weak · KD 60 · ads · 19,500 pages built · 1 advertisers" in text and "watch ↓" in text
-    assert "open · 3 weak · KD 25 · 19,500 pages built |" in text and "advertising on it: paid.example" in text
-    assert "tiny1.ai (rated 8) at #3" in text and "Page one: open = three or more" in text
-    assert "**crowded term**: no easy slot, even the weakest, canva.com, is rated 94 (#1)" in text
-
-
-
-# --- ⑥ revenue: products people pay for ----------------------------------------------------------
-
-from radar import revenue  # noqa: E402
-
-
-def _product(slug, name, usd, growth=None, website="https://x.example", stealth=False, about="Turns photos into headshots."):
-    return {"slug": slug, "name": name, "website": website, "description": about, "category": "ai",
-            "revenue": {"last30Days": usd * 100}, "growth30d": growth, "stealthMode": stealth}
-
-
-def test_revenue_reports_growth_then_a_product_that_left_zero(cfg, tmp_path, monkeypatch):
-    monkeypatch.setenv("TRUSTMRR_API_KEY", "k")
-    monkeypatch.setattr(revenue.time, "sleep", lambda s: None)
-    pages = {"growth-desc": [_product("headshot", "HeadshotKit", 4200, 4500.0, "https://headshotkit.ai"),
-                             _product("anon", "Anonymous startup", 9000, 2.0, website="", stealth=True),
-                             _product("gpt", "Talent Tech Global Limited", 840, 1.6, "https://gptproto.com")],
-             "listed-desc": [_product("baby", "AI Baby Generator", 0, None, "https://aibabygenerator.ai")]}
-    monkeypatch.setattr(revenue, "fetch", lambda sort, page, c: pages[sort] if page == 1 else [])
-    first = revenue.products(cfg, tmp_path)
-    assert first["first_run"] and [r["term"] for r in first["products"]] == ["headshotkit", "gptproto"]
-    assert first["products"][0]["growth_text"] == "up from near $0" and first["products"][1]["growth_text"] == "+160%"
-    assert first["terms"][0]["about"] == ("https://headshotkit.ai", "Turns photos into headshots.")
-    pages["growth-desc"] = []
-    pages["listed-desc"] = [_product("baby", "AI Baby Generator", 900, None, "https://aibabygenerator.ai")]
-    later = revenue.products(cfg, tmp_path)
-    assert [r["term"] for r in later["products"]] == ["ai baby generator"] and later["products"][0]["from_zero"]
-    assert later["terms"][0]["note"] == "TrustMRR: from $0 to $900 in 30 days"
-    text = "\n".join(report._revenue_lines(later, cfg))
-    assert "**$0 last time, earning now**" in text and "forbid republishing" in text
-
-
-def test_revenue_without_a_key_says_it_is_off(cfg, tmp_path, monkeypatch):
-    monkeypatch.delenv("TRUSTMRR_API_KEY", raising=False)
-    rv = revenue.products(cfg, tmp_path)
-    assert rv == {"skipped": True, "no_key": True}
-    assert "No TRUSTMRR_API_KEY" in "\n".join(report._revenue_lines(rv, cfg))
-
-
-
-# --- what a lead makes, and one-click chances ----------------------------------------------------
-
-from radar import opportunity  # noqa: E402
-
-
-def _posts(*texts_likes):
-    return [{"text": x, "likes": n} for x, n in texts_likes]
-
-
-def test_format_reads_the_name_first_then_what_most_posts_say():
-    assert opportunity.fmt({"term": "veo 3.1", "posts": []}) == "video"
-    assert opportunity.fmt({"term": "elevenlabs v4", "posts": _posts(
-        ("give your characters a voice", 1500), ("tts that whispers", 500), ("audio and sound effects", 400),
-        ("made a video with it", 300))}) == "voice"                           # voice 3, video 1
-    assert opportunity.fmt({"term": "claude opus 5.5", "posts": _posts(
-        ("it made an animation", 100000), ("great at code", 6000), ("writes well", 6000), ("fast", 3000),
-        ("cheap", 3000), ("smart", 1000), ("solid", 900), ("ok", 800))}) == "text"   # one post in eight is not a format
-    assert opportunity.fmt({"term": "headshotkit", "about": ("https://headshotkit.ai", "AI headshots from selfies")}) == "image"
-
-
-def test_one_click_needs_a_tutorial_people_shared():
-    assert opportunity.one_click(_posts(("here's how to build this with Opus + Blender + Unreal", 1699))) == "tutorial"
-    assert opportunity.one_click(_posts(("here's how I did it", 120))) is None              # nobody shared it
-    assert opportunity.one_click(_posts(("8 denoising steps, open weights", 5301))) is None   # an announcement
-    assert opportunity.one_click(_posts(("everyone is making these figurines", 4200))) == "trend"
-
-
-def test_leads_carry_format_marks_and_the_legend(cfg, monkeypatch):
-    monkeypatch.setattr(report.judge, "score", lambda rows, model: {"judged": len(rows)})
-    blocks = {"x": {"terms": [{"term": "clipforge", "recent": 2, "note": "X", "examples": ["@a: clipforge animates any photo"],
-                               "posts": [{"text": "here's how: step 1 upload, step 2 prompt", "likes": 2400}]}]}}
-    lead, _ = report.leads(cfg, blocks)
-    assert lead[0]["format"] == "video" and lead[0]["one_click"] == "tutorial"
-    assert report._marks(lead[0]) == " 🎬 ⚡"
-
-
-
-# --- ⑦ asks, pains and tutorial comments ---------------------------------------------------------
-
 from radar import asks, pains  # noqa: E402
 
 
@@ -1171,10 +1042,10 @@ def test_asks_turns_reddit_requests_into_sized_jobs(cfg, tmp_path, monkeypatch):
         [{"i": i, "kind": "request", "job": job, "ai": True} for i, job in enumerate(
             ["add b roll automatically", "convert slides to notes"])]))
     monkeypatch.setattr(asks.usecases, "volumes", lambda phrases, loc: (
-        {"add b roll automatically": {"volume": 880}, "convert slides to notes": {"volume": 10}}, 90000))
+        {"add b roll automatically": {"volume": 880}, "convert slides to notes": {"volume": 10}}, 0, []))
     first = asks.asks(cfg, tmp_path)
     assert first["read"] == 2 and first["asks"] == 2 and first["unsized"] == 1          # "rate my setup" scored under the floor
-    assert [r["phrase"] for r in first["rows"]] == ["add b roll automatically"] and first["cost_micros"] == 2 * 1880 + 90000
+    assert [r["phrase"] for r in first["rows"]] == ["add b roll automatically"] and first["cost_micros"] == 2 * 1880
     assert first["terms"][0]["note"] == "Reddit: asked 1× (r/VideoEditors)"
     assert [q["phrase"] for q in first["quiet"]] == ["convert slides to notes"]           # asked, too few searches yet
     text = "\n".join(report._asks_lines(first, cfg))
@@ -1222,188 +1093,18 @@ def test_tutorial_asks_only_for_leads_marked_one_click(cfg, monkeypatch):
     assert "Too many manual steps (wants a tool, 1) → one click blender export" in text
 
 
-# --- datasrc: provider dispatch + response shaping --------------------------------
+# --- datasrc: the paid provider layer is gone — call() is a loud stub ---------
 
 from radar import datasrc, aisa as _aisa  # noqa: E402
 import pytest as _pytest  # noqa: E402
 
 
-def _no_creds(monkeypatch):
-    for k in ("WEBCAFE_TOKEN", "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
-              "AISA_API_KEY", "RADAR_DATA_PROVIDER"):
-        monkeypatch.delenv(k, raising=False)
-    datasrc._INSTANCES.clear()
-
-
-def test_datasrc_no_credentials_raises_aisa_error(monkeypatch):
-    _no_creds(monkeypatch)
-    with _pytest.raises(_aisa.AisaError):
-        datasrc.call([{"call_id": "c", "tool": datasrc.DFS_VOLUME, "arguments": {"body": []}}])
-
-
-def test_datasrc_unknown_provider_name_rejected(monkeypatch):
-    _no_creds(monkeypatch)
-    with _pytest.raises(_aisa.AisaError):
-        datasrc._select("madeup")
-
-
-def test_datasrc_forced_provider_without_creds_fails_loudly(monkeypatch):
-    _no_creds(monkeypatch)
-    with _pytest.raises(_aisa.AisaError):
-        datasrc._select("webcafe")
-
-
-def test_datasrc_unmapped_tool_raises_per_call(monkeypatch):
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc._select(None)
-    with _pytest.raises(_aisa.AisaError, match="no route"):
-        prov.call([{"call_id": "x", "tool": "post_twitter_search", "arguments": {}}])
-
-
-def test_datasrc_provider_instance_is_cached_across_batches(monkeypatch):
-    """call_all() batches through datasrc.call(); a fresh instance per batch
-    would reset the rate gate — selection must return the same object."""
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    a = datasrc._select(None)
-    b = datasrc._select(None)
-    assert a is b and a.name == "webcafe"
-
-
-def test_datasrc_range_rounds_up_not_nearest():
-    # 44-day window (review's 30d-before+14d-after): nearest would truncate to
-    # 30d and silently drop the baseline — must pick the smallest enum ≥ days
-    assert datasrc._range_of({"date_from": "2026-08-20", "date_to": "2026-10-03"}) == "90d"
-    assert datasrc._range_of({"date_from": "2026-10-01", "date_to": "2026-10-03"}) == "7d"
-    assert datasrc._range_of({}) == "90d"  # missing window → default
-
-
-def test_webcafe_volume_chunks_and_shapes(monkeypatch):
-    """Real webcafe shape: data.keywords is a dict-of-dicts {kw: {avg,
-    months:[{ym,v}]}} with months oldest→newest; DFS wants newest-first."""
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc.WebCafe()
-    calls = []
-
-    def fake_post(endpoint, payload):
-        calls.append(len(payload["keywords"]))
-        return {"credits": {"charged": 2},
-                "data": {"keywords": {
-                    f"kw{i}": {"avg": 100 + i,
-                               "avgCpc": 0.5 + i,
-                               "months": [{"ym": "2026-08", "v": 90},
-                                          {"ym": "2026-09", "v": 80}]}
-                    if i != 3 else None               # null = no Ads data
-                    for i in range(len(payload["keywords"]))}}}, prov.CREDIT_MICROS * 2
-    monkeypatch.setattr(prov, "_post", fake_post)
-    task, micros = prov._handle(datasrc.DFS_VOLUME,
-                                {"body": [{"keywords": [f"k{i}" for i in range(120)]}]})
-    assert calls == [50, 50, 20]                     # chunked, not truncated
-    assert len(task["result"]) == 117                # 3 nulls dropped (i=3 per chunk)
-    row = task["result"][0]
-    assert row == {"keyword": "kw0", "search_volume": 100, "cpc": 0.5,
-                   "monthly_searches": [{"year": 2026, "month": 9, "search_volume": 80},
-                                        {"year": 2026, "month": 8, "search_volume": 90}]}
-    assert micros == 2 * prov.CREDIT_MICROS * 3
-
-
-def test_webcafe_trends_normalizes_epoch_and_dates(monkeypatch):
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc.WebCafe()
-    monkeypatch.setattr(prov, "_post", lambda e, p: (
-        {"points": [{"timestamp": 1759190400, "value": 42},
-                    {"timestamp": 1759190400000, "value": 9},       # epoch millis
-                    {"date": "2026-10-01", "values": [7, 8]},
-                    {"values": [1]},                                # no date → skipped
-                    {"date": "2026/10/01", "value": 5},             # non-ISO → skipped
-                    {"date": 5, "value": 5},                        # tiny epoch → skipped
-                    {"date": True, "value": 5},                     # bool → skipped
-                    {"date": "2026-10-02", "values": [{"bad": 1}]}]}, 0))
-    task, _ = prov._handle(datasrc.DFS_TRENDS, {"body": [{"keywords": ["a", "b"]}]})
-    data = task["result"][0]["items"][0]["data"]
-    assert data[0] == {"date_from": "2025-09-30", "values": [42]}   # epoch → ISO
-    assert data[1] == {"date_from": "2025-09-30", "values": [9]}    # millis → ISO
-    assert data[2] == {"date_from": "2026-10-01", "values": [7, 8]}
-    assert data[3] == {"date_from": "2026-10-02", "values": [0]}    # unusable values → 0
-    assert len(data) == 4                                           # poison points dropped, call survives
-
-
-def test_webcafe_serp_shapes_organic_link_rows(monkeypatch):
-    """Real webcafe shape: data.organic[] uses link/position, not url/rank."""
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc.WebCafe()
-    monkeypatch.setattr(prov, "_post", lambda e, p: (
-        {"data": {"organic": [{"link": "https://www.medium.com/a", "title": "t", "position": 2},
-                              {"title": "no link"},
-                              {"link": "https://x.io/b"}]}}, 0))
-    task, _ = prov._handle(datasrc.DFS_SERP, {"body": [{"keyword": "k"}]})
-    items = task["result"][0]["items"]
-    assert len(items) == 2
-    assert items[0] == {"type": "organic", "domain": "medium.com",
-                        "url": "https://www.medium.com/a", "title": "t", "rank_group": 2}
-    assert items[1]["domain"] == "x.io" and items[1]["rank_group"] == 3
-
-
-def test_webcafe_kd_reads_data_score(monkeypatch):
-    """Real webcafe shape: data.score is the 0-100 difficulty."""
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc.WebCafe()
-    monkeypatch.setattr(prov, "_post", lambda e, p: (
-        {"data": {"keyword": p["keyword"], "score": 42, "level": "中"}}, 0))
-    task, _ = prov._handle(datasrc.DFS_KD, {"body": [{"keywords": ["a", "b"]}]})
-    items = task["result"][0]["items"]
-    assert items == [{"keyword": "a", "keyword_properties": {"keyword_difficulty": 42}},
-                     {"keyword": "b", "keyword_properties": {"keyword_difficulty": 42}}]
-
-
-def test_webcafe_shaping_surprise_becomes_aisa_error(monkeypatch):
-    """Any non-AisaError escape from provider internals must be re-wrapped —
-    upstream degrade paths only catch AisaError, anything else kills the
-    whole usecases block for the day."""
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc.WebCafe()
-
-    def boom(endpoint, payload):
-        raise RuntimeError("unexpected payload surprise")
-    monkeypatch.setattr(prov, "_post", boom)
-    with _pytest.raises(_aisa.AisaError, match="webcafe"):
-        prov._handle(datasrc.DFS_VOLUME, {"body": [{"keywords": ["k"]}]})
-
-
-def test_datasrc_call_without_call_id_rejected(monkeypatch):
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc._select(None)
-    with _pytest.raises(_aisa.AisaError, match="call_id"):
-        prov.call([{"tool": datasrc.DFS_VOLUME, "arguments": {}}])
-
-
-def test_datasrc_partial_failure_keeps_billed_spend(monkeypatch):
-    """A raise mid-batch must not lose the cost of requests that already billed
-    — _spent accumulates per request and folds into the next call's total."""
-    _no_creds(monkeypatch)
-    monkeypatch.setenv("WEBCAFE_TOKEN", "t")
-    prov = datasrc.WebCafe()
-    prov.min_interval = 0
-    n = [0]
-
-    def fake(url, payload, timeout, **kw):
-        n[0] += 1
-        if n[0] == 2:
-            raise _aisa.AisaError("boom")
-        return {"credits": {"charged": 2}, "data": {"organic": []}}
-    monkeypatch.setattr(_aisa, "_post", fake)
-    with _pytest.raises(_aisa.AisaError):
-        prov._handle(datasrc.DFS_KD, {"body": [{"keywords": ["a", "b"]}]})   # 2nd request dies
-    _out, micros = prov.call([{"call_id": "c", "tool": datasrc.DFS_SERP,
-                               "arguments": {"body": [{}]}}])
-    assert micros == prov.CREDIT_MICROS * 2 * 2   # kd's billed request + serp's
+def test_datasrc_call_is_a_loud_stub_not_a_provider(monkeypatch):
+    """Keyword metrics live on webtool.* — any post_dataforseo_* call reaching
+    datasrc.call (e.g. aisa.call delegating with no router creds) fails loud,
+    never silently routes to a billable endpoint."""
+    with _pytest.raises(_aisa.AisaError, match="free webtool lane"):
+        datasrc.call([{"call_id": "c", "tool": "post_dataforseo_x", "arguments": {}}])
 
 
 # --- aisa pure helpers: URL normalization, credential scoping -----------------

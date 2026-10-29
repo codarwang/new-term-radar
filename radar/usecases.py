@@ -52,21 +52,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import UA, aisa, competition, datasrc, goanyapi, review, snap, webtool
-
-
-def _paid_fallback() -> bool:
-    """RADAR_PAID_FALLBACK=1 lets a failed free-lane call retry on the billed
-    providers. Default off: a webtool/queue failure degrades to 'no data'
-    instead of silently spending money — that is the whole point of the lane."""
-    return os.environ.get("RADAR_PAID_FALLBACK") == "1"
+from . import UA, aisa, competition, datasrc, review, snap, webtool
 
 POSTS_KEPT = 12
 POST_CHARS = 400
 README_CHARS = 3000
 MIN_FAVES = 50
 SEARCH_DAYS = 14
-TRENDS_DAYS, RECENT_DAYS = 90, 7
+RECENT_DAYS = 7
 MOMENTUM_MIN_BASE = 5      # of 100: the week before must reach this for a week-on-week ratio
 NOW_DAYS = 3               # a peak in the last three settled days is still rising
 HOLD_SHARE = 0.5           # at half its peak or more in those days, a term is holding
@@ -76,7 +69,6 @@ MAX_PER_NAME = 6
 STATE_DAYS = 30
 ASKED_MAX = 8              # names read in one `keywords` call: each costs several paid lookups
 SEARCH_TOOL = "get_twitter_tweet_advanced_search"
-VOLUME_TOOL = "post_dataforseo_keywords_gads_search_volume_live"
 SYSTEM = (
     "You help an SEO researcher who builds tool pages around new AI releases. You get the NAME of a new model, product "
     "or repository and EVIDENCE: popular posts about it and, for a repository, its README.\n"
@@ -273,26 +265,32 @@ def relevant(cands: list[dict]) -> list[dict]:
     return [c for c in cands if not c.get("is_name") and c.get("relevance", 1.0) >= RELEVANT_MIN]
 
 
-def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], int]:
-    """{phrase: {"volume", "month"}} from Google Ads, one batch call.
-    Prefers the webcafe provider (2–5分/50 keywords, unified billing) when
-    WEBCAFE_TOKEN is set; the AIsa/DataForSEO route stays as the fallback."""
-    if not phrases:
-        return {}, 0
-    call = datasrc.call if os.environ.get("WEBCAFE_TOKEN", "").strip() else aisa.call
-    data, cost = call([{"call_id": "vol", "tool": VOLUME_TOOL, "arguments": {"body": [{
-        "keywords": phrases, "location_code": location_code, "language_code": "en"}]}}])
-    out = {}
-    for r in ((data.get("vol") or {}).get("tasks") or [{}])[0].get("result") or []:
-        ms = r.get("monthly_searches") or []
-        out[r["keyword"]] = {"volume": int(r.get("search_volume") or 0),
-                             "cpc": r.get("cpc"),
-                             "month": f"{ms[0]['year']}-{ms[0]['month']:02d}" if ms else ""}
-    return out, cost
+def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], int, list[str]]:
+    """{phrase: {"volume", "month", "_audit"}} — one free webtool.kd audit per
+    phrase carries volume + SERP + kd score; the raw audit rides the row for
+    competition.assess to consume (one call, two consumers). CPC has no free
+    source — the field is absent rather than paid for. Cost is always 0:
+    a dead pool raises and stops the stage; other failures are per-phrase
+    errors listed under the table."""
+    out, errors = {}, []
+    gl = datasrc._gl(location_code)
+    month_now = date.today().isoformat()[:7]
+    for p in phrases:
+        try:
+            a = webtool.kd(p, gl)
+        except webtool.PoolExhausted:
+            raise   # the shared pool is dead — stop, don't fake a thin table
+        except webtool.WebToolError as exc:
+            errors.append(f"{p}: {exc}")
+            continue
+        out[p] = {"volume": int(a.get("volume") or 0),
+                  "month": str(a.get("computed_at") or "")[:7] or month_now,
+                  "_audit": a}
+    return out, 0, errors
 
 
 WORLD = {"unsettled": review.UNSETTLED_DAYS, "window": 30, "factor": review.RISE_FACTOR, "days": 2}
-# One country, 30 days, settled to yesterday (goanyapi.daily_series). The rise is judged in
+# One country, settled daily data (webtool.series per-geo, free). The rise is judged in
 # the last 10 days against the 20 before. An established term has a high baseline, so the
 # bar is 1.5x for three days: "photoshop alternative" ran 77-100 against 50 for five days
 # after PhotoCraft appeared, a real move that 2x would miss.
@@ -357,14 +355,11 @@ def country_series(rows: list[dict], c: dict) -> tuple[dict[str, list], int, lis
 
     def one(phrase: str):
         try:
-            # free lane: the browser tool's own geo series (30d), settled daily
+            # the browser tool's own geo series (30d), settled daily
             return phrase, (webtool.series(phrase, c["related_geo"], "30d"), 0), ""
+        except webtool.PoolExhausted:
+            raise   # the shared pool is dead — fail the stage, don't fake flat
         except webtool.WebToolError as exc:
-            if not (_paid_fallback() and goanyapi.key()):
-                return phrase, ([], 0), str(exc)
-        try:
-            return phrase, goanyapi.daily_series(phrase, c["related_geo"]), ""
-        except goanyapi.GoAnyError as exc:
             return phrase, ([], 0), str(exc)
     out, cost, errors = {}, 0, []
     with ThreadPoolExecutor(max_workers=COUNTRY_WORKERS) as pool:
@@ -439,52 +434,22 @@ def decide(s: dict, per_day: int | None, min_daily: int) -> str:
     return "prioritize" if big else "watch"
 
 
-def _pairs(task: dict) -> list[tuple[date, int, int]]:
-    try:
-        item = task["result"][0]["items"][0]
-    except (KeyError, IndexError, TypeError):
-        return []
-    rows = []
-    for p in item.get("data", []):
-        v = (p.get("values") or []) + [0, 0]
-        rows.append((date.fromisoformat(p["date_from"]), int(v[0] or 0), int(v[1] or 0)))
-    return rows
-
-
 def fetch_series(keywords: list[str], benchmark: str, today: date) -> tuple[dict[str, dict], int, list[str]]:
     """({keyword: {"solo": [(day, value)], "pair": [(day, value, benchmark value)]}}, cost_micros, errors):
-    two Trends lookups each; a keyword whose request fails (e.g. no curve →
-    provider ok:false) is skipped and named in errors instead of sinking the batch."""
-    window = {"date_from": (today - timedelta(days=TRENDS_DAYS)).isoformat(), "date_to": today.isoformat()}
-    out, cost, errors = {}, 0, []
+    one free trends call each — [k, benchmark] in a single request returns both
+    series on a shared 0-100 scale. A keyword whose call fails is skipped and
+    named in errors; a dead pool fails the run, it does not fake no_data."""
+    out, errors = {}, []
     for k in keywords:
         try:
-            # free lane: ONE browser-tool call [k, benchmark] returns both series
-            # on a shared 0–100 scale — the two paid Trends calls' twin
             out[k] = webtool.pair_series(k, benchmark, range="90d", geo="")
-            continue
+        except webtool.PoolExhausted:
+            raise   # the shared pool is dead — stop, don't judge half the set
         except webtool.WebToolError as exc:
-            if not _paid_fallback():
-                # a word with no curve is honestly "no data" — skip it, don't
-                # sink the other keywords, don't silently start spending
-                errors.append(f"{k}: {' '.join(str(exc).split())}")
-                continue
-        calls = [
-            {"call_id": "s", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k], **window}]}},
-            {"call_id": "p", "tool": review.TOOL, "arguments": {"body": [{"keywords": [k, benchmark], **window}]}},
-        ]
-        try:
-            data, c = aisa.call_all(calls)
-        except aisa.AisaError as exc:
-            # a word with no Trends curve fails its whole request (the provider
-            # answers ok:false and refunds the credits): that word is honestly
-            # "no data" — skip it, don't sink the other keywords' series with it
+            # a word with no curve is honestly "no data" — skip it, don't
+            # sink the other keywords' series
             errors.append(f"{k}: {' '.join(str(exc).split())}")
-            continue
-        cost += c
-        task = lambda cid: ((data.get(cid) or {}).get("tasks") or [{}])[0]  # noqa: E731
-        out[k] = {"solo": review._series(task("s")), "pair": _pairs(task("p"))}
-    return out, cost, errors
+    return out, 0, errors
 
 
 def measure(rows: list[dict], series: dict[str, dict], min_daily: int, today: date,
@@ -532,12 +497,11 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
         return {"names": [], "rows": [], "proposed": 0, "cost_micros": 0}
     ev, cost = evidence(todo, repos, today, texts)
     proposed: dict[str, dict] = {}
-    asked, c0 = 0, 0
+    asked = 0
     tails: dict[str, list[str]] = {}
     cosearch: list[dict] = []
     related_errors: list[str] = []
-    # the free lane answers related-queries without a key at all; the paid
-    # GoAnyAPI route is a RADAR_PAID_FALLBACK opt-in now, not the default
+    # the free lane answers related-queries without a key at all
     use_related = c.get("related", True)
     for name in todo:
         try:
@@ -549,17 +513,12 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
             continue
         if use_related:
             try:
-                related, cost_r = webtool.related_queries(name, c["related_geo"]), 0
+                related = webtool.related_queries(name, c["related_geo"])
+            except webtool.PoolExhausted:
+                raise   # the shared pool is dead — stop, don't degrade silently
             except webtool.WebToolError as exc:
-                related, cost_r = {}, 0
-                if _paid_fallback() and goanyapi.key():
-                    try:
-                        related, cost_r = goanyapi.related_queries(name, c["related_geo"])
-                    except goanyapi.GoAnyError as exc2:
-                        exc = exc2
-                if not related:
-                    related_errors.append(f"{name}: {exc}")
-            c0 += cost_r
+                related = {}
+                related_errors.append(f"{name}: {exc}")
             tails[name], searched = split_related(name, related)
             have = {u["phrase"] for u in cands}
             cands += [u for u in searched if u["phrase"] not in have]
@@ -573,7 +532,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
             if u["source"] == "searched":
                 row["source"] = "searched"
     bench = c["benchmark"].lower()
-    vol, c2 = volumes(sorted(proposed), c["location_code"])
+    vol, c2, vol_errors = volumes(sorted(proposed), c["location_code"])
     generic = sorted((dict(r, **vol[p]) for p, r in proposed.items() if vol.get(p, {}).get("volume", 0) >= c["min_volume"]),
                      key=lambda r: -r["volume"])[:c["trends_max"]]
     rows = [{"term": n, "phrase": n, "kind": "name", "names": [], "brand": True, "evidence": "", **vol.get(n, {})} for n in todo] + generic
@@ -589,14 +548,16 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
             s["runs"] += 1
         cutoff = (today - timedelta(days=STATE_DAYS)).isoformat()
         snap.save(path, {n: s for n, s in seen.items() if s["first"] >= cutoff})
+    for r in rows:
+        r.pop("_audit", None)   # raw SERP blob rode the row for assess — not report data
     return {"names": todo, "rows": rows, "proposed": asked, "relevant": len(proposed), "kept": len(generic), "benchmark": bench,
             "bench_daily": round(daily) if daily else None, "volume_month": next((r["month"] for r in generic if r.get("month")), ""),
             "no_evidence": [n for n in todo if not ev[n]["posts"] and not ev[n]["readme"]],
             "posts_error": "; ".join(f"{n}: {e['error']}" for n, e in ev.items() if e.get("error")),
             "related": use_related, "tails": {n: v for n, v in tails.items() if v}, "cosearch": cosearch,
             "related_errors": related_errors, "geo": c["related_geo"], "country_errors": local_errors,
-            "series_errors": series_errors,
-            "competition_errors": comp_errors, "cost_micros": cost + c0 + c2 + c3 + c4 + c5}
+            "series_errors": series_errors, "volume_errors": vol_errors,
+            "competition_errors": comp_errors, "cost_micros": cost + c2 + c3 + c4 + c5}
 
 
 READ_KINDS = {"x", "hf", "breakout", "newsite", "revenue"}
