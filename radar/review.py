@@ -16,8 +16,11 @@ This is verification, not discovery: it tells you which signals to trust.
 """
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import statistics
+import urllib.request
 from datetime import date, timedelta
 
 from . import aisa, store
@@ -31,6 +34,15 @@ TOOL = "post_dataforseo_keywords_trends_explore_live"
 # then 100 for unrelated terms ("ai image detector": ..., 5, 5, 0, 100 on 2026-10-12),
 # which reads as a rise. Every reader drops them (settled()).
 UNSETTLED_DAYS = 2
+# a remote call whose checked row the ledger keeps refusing (name no longer
+# resolves to a term) would re-pull forever and burn MAX_VARIANTS Trends tasks
+# a day — attempts are capped once the calls were paid for
+MAX_REMOTE_ATTEMPTS = 3
+_REMOTE_ATTEMPTS = """CREATE TABLE IF NOT EXISTS remote_attempts(
+  term TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL,
+  last_at TEXT NOT NULL
+)"""
 
 
 def settled(points: list[tuple], today: date) -> list[tuple]:
@@ -89,20 +101,70 @@ def plan_calls(due: list[tuple], today: date, after_days: int = 14) -> tuple[lis
     return calls, plan
 
 
+def _remote_due(conn: sqlite3.Connection, room: int, after_days: int, seen: set[str]) -> list[tuple]:
+    """D1-side calls due for review — terms that entered the corpus via paths
+    other than the vendor leads table (webcafe feed, demand sweeps, …). The
+    public ledger counts every live term as an open call; this pull is their
+    only path to a verdict. Fail-soft: missing creds or a dead endpoint must
+    not take the local leads review down with it."""
+    base = os.environ.get("INGEST_URL", "").rstrip("/")
+    secret = os.environ.get("INGEST_SECRET", "")
+    if not base or not secret or room <= 0:
+        return []
+    conn.execute(_REMOTE_ATTEMPTS)
+    try:
+        req = urllib.request.Request(
+            f"{base}/api/accuracy-due?limit={room * 2 + 10}&after_days={after_days}",
+            headers={"Authorization": f"Bearer {secret}"})
+        items = json.loads(urllib.request.urlopen(req, timeout=30).read()).get("items", [])
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        term = it.get("term")
+        try:
+            fs = date.fromisoformat(str(it.get("first_seen", "")))
+        except ValueError:
+            continue
+        if not term or term in seen:
+            continue
+        row = conn.execute("SELECT attempts FROM remote_attempts WHERE term=?", (term,)).fetchone()
+        if row and row[0] >= MAX_REMOTE_ATTEMPTS:
+            continue
+        seen.add(term)
+        out.append((term, fs, []))
+        if len(out) >= room:
+            break
+    return out
+
+
 def review(cfg: dict, conn: sqlite3.Connection, today: date | None = None) -> dict:
     today = today or date.today()
     c = cfg["review"]
     due = store.due(conn, today, c["after_days"], c["per_day"])
+    seen = {t for t, _, _ in due}
+    remote = _remote_due(conn, c["per_day"] - len(due), c["after_days"], seen)
+    remote_terms = {t for t, _, _ in remote}
+    due = due + remote
     if not due:
         return {"checked": [], "cost_micros": 0, "after_days": c["after_days"]}
     calls, plan = plan_calls(due, today, c["after_days"])
     data, cost = aisa.call_all(calls)
     checked = []
     for ids, term, first_seen, keys in plan:
+        if term in remote_terms:
+            # the Trends calls were already paid for — count the attempt so a
+            # term the ingest side keeps skipping stops re-pulling forever
+            conn.execute("INSERT INTO remote_attempts(term, attempts, last_at) VALUES(?, 1, ?) "
+                         "ON CONFLICT(term) DO UPDATE SET attempts = attempts + 1, "
+                         "last_at = excluded.last_at", (term, today.isoformat()))
+            conn.commit()
         if not all(cid in data for cid in ids):
             continue   # stays due; the next run takes it again
         per = {k: rose(settled(_series((data[cid].get("tasks") or [{}])[0]), today), first_seen) for cid, k in zip(ids, keys)}
         v, lead = verdict(per, first_seen)
+        # save_verdict no-ops for names without a leads row — the verdict
+        # lands in the ledger via the checked row, same as lead verdicts
         store.save_verdict(conn, term, v, lead, per, today)
         checked.append({"term": term, "first_seen": first_seen.isoformat(), "verdict": v, "lead_days": lead})
     return {"checked": checked, "cost_micros": cost, "after_days": c["after_days"]}
