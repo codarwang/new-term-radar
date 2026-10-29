@@ -76,7 +76,12 @@ def due(conn: sqlite3.Connection, today: date, after_days: int, limit: int) -> l
 
 def save_verdict(conn: sqlite3.Connection, term: str, verdict: str, lead_days: int | None, trends: dict,
                  today: date | None = None) -> None:
-    conn.execute("UPDATE leads SET reviewed_at = ?, verdict = ?, lead_days = ?, trends = ? WHERE term = ?",
+    # reviewed_at IS NULL: a remote-reviewed term can collide with an
+    # already-judged leads row whose checked row hasn't been ingested into D1
+    # yet — without the guard the remote verdict would overwrite the local one
+    # (computed off a different first_seen baseline) and flip hit/miss history.
+    conn.execute("UPDATE leads SET reviewed_at = ?, verdict = ?, lead_days = ?, trends = ? "
+                 "WHERE term = ? AND reviewed_at IS NULL",
                  ((today or date.today()).isoformat(), verdict, lead_days, json.dumps(trends), term))
     conn.commit()
 

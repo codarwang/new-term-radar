@@ -664,6 +664,33 @@ def test_remote_due_survives_a_malformed_payload(tmp_path, monkeypatch):
     assert review._remote_due(conn, TODAY, 10, 14, set()) == []
 
 
+def test_review_marks_remote_attempts_and_resets_after_expiry(cfg, tmp_path, monkeypatch):
+    conn = store.connect(tmp_path)
+    _remote_stub(monkeypatch, [{"term": "alpha", "first_seen": "2026-09-20", "variants": []}])
+    answer = {"tasks": [{"result": [{"items": [{"data": []}]}]}]}
+    monkeypatch.setattr(review.aisa, "call_all",
+                        lambda calls: ({c["call_id"]: answer for c in calls}, 300))
+    review.review(cfg, conn, TODAY)
+    assert conn.execute(
+        "SELECT attempts, last_at FROM remote_attempts WHERE term='alpha'").fetchone() == \
+        (1, TODAY.isoformat())
+    # a cap older than the reset window restarts the counter rather than
+    # accreting past it
+    conn.execute("UPDATE remote_attempts SET attempts=3, last_at='2026-01-01' WHERE term='alpha'")
+    review.review(cfg, conn, TODAY)
+    assert conn.execute(
+        "SELECT attempts FROM remote_attempts WHERE term='alpha'").fetchone()[0] == 1
+
+
+def test_save_verdict_does_not_overwrite_a_judged_lead(tmp_path):
+    conn = store.connect(tmp_path)
+    store.record(conn, [_lead("claude code", ["x"])], date(2026, 9, 20))
+    store.save_verdict(conn, "claude code", "hit", 3, {}, date(2026, 10, 4))
+    store.save_verdict(conn, "claude code", "miss", None, {}, date(2026, 10, 29))
+    row = conn.execute("SELECT verdict, lead_days FROM leads WHERE term='claude code'").fetchone()
+    assert row == ("hit", 3)   # the remote re-review can't flip the local call
+
+
 def test_screen_drops_loosely_related_keywords_and_keeps_all_when_the_call_fails(monkeypatch):
     cands = [{"phrase": p, "brand": False} for p in ("ai image detector", "chatgpt alternative", "ai audio detector")]
     ev = {"posts": [{"text": "check if any image is AI generated", "likes": 900, "by": "a"}], "readme": ""}

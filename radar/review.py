@@ -148,8 +148,10 @@ def _remote_due(conn: sqlite3.Connection, today: date, room: int, after_days: in
                 continue
             # the term name always leads its own variant list — linked demand
             # keywords fill the rest of plan_calls' MAX_VARIANTS spread
+            raw_variants = it.get("variants")
             variants = list(dict.fromkeys(
-                [term] + [v for v in it.get("variants", []) if isinstance(v, str)]))
+                [term] + [v for v in (raw_variants if isinstance(raw_variants, list) else [])
+                          if v and isinstance(v, str)]))
             seen.add(term)
             out.append((term, fs, variants))
             if len(out) >= room:
@@ -178,14 +180,18 @@ def review(cfg: dict, conn: sqlite3.Connection, today: date | None = None) -> di
             # the Trends calls were already paid for — count the attempt so a
             # term the ingest side keeps skipping stops re-pulling forever.
             # An attempt older than RESET days resets the counter rather than
-            # accreting past the cap.
-            conn.execute("INSERT INTO remote_attempts(term, attempts, last_at) VALUES(?, 1, ?) "
-                         "ON CONFLICT(term) DO UPDATE SET "
-                         "attempts = CASE WHEN remote_attempts.last_at < ? THEN 1 "
-                         "ELSE remote_attempts.attempts + 1 END, "
-                         "last_at = excluded.last_at",
-                         (term, today.isoformat(), retry_cut))
-            conn.commit()
+            # accreting past the cap. A local sqlite fault must not kill the
+            # run — worst case the term re-pulls once more tomorrow.
+            try:
+                conn.execute("INSERT INTO remote_attempts(term, attempts, last_at) VALUES(?, 1, ?) "
+                             "ON CONFLICT(term) DO UPDATE SET "
+                             "attempts = CASE WHEN remote_attempts.last_at < ? THEN 1 "
+                             "ELSE remote_attempts.attempts + 1 END, "
+                             "last_at = excluded.last_at",
+                             (term, today.isoformat(), retry_cut))
+                conn.commit()
+            except sqlite3.Error:
+                pass
         if not all(cid in data for cid in ids):
             continue   # stays due; the next run takes it again
         per = {k: rose(settled(_series((data[cid].get("tasks") or [{}])[0]), today), first_seen) for cid, k in zip(ids, keys)}
