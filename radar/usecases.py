@@ -286,6 +286,7 @@ def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], in
     for r in ((data.get("vol") or {}).get("tasks") or [{}])[0].get("result") or []:
         ms = r.get("monthly_searches") or []
         out[r["keyword"]] = {"volume": int(r.get("search_volume") or 0),
+                             "cpc": r.get("cpc"),
                              "month": f"{ms[0]['year']}-{ms[0]['month']:02d}" if ms else ""}
     return out, cost
 

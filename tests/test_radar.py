@@ -1292,6 +1292,7 @@ def test_webcafe_volume_chunks_and_shapes(monkeypatch):
         return {"credits": {"charged": 2},
                 "data": {"keywords": {
                     f"kw{i}": {"avg": 100 + i,
+                               "avgCpc": 0.5 + i,
                                "months": [{"ym": "2026-08", "v": 90},
                                           {"ym": "2026-09", "v": 80}]}
                     if i != 3 else None               # null = no Ads data
@@ -1302,7 +1303,7 @@ def test_webcafe_volume_chunks_and_shapes(monkeypatch):
     assert calls == [50, 50, 20]                     # chunked, not truncated
     assert len(task["result"]) == 117                # 3 nulls dropped (i=3 per chunk)
     row = task["result"][0]
-    assert row == {"keyword": "kw0", "search_volume": 100,
+    assert row == {"keyword": "kw0", "search_volume": 100, "cpc": 0.5,
                    "monthly_searches": [{"year": 2026, "month": 9, "search_volume": 80},
                                         {"year": 2026, "month": 8, "search_volume": 90}]}
     assert micros == 2 * prov.CREDIT_MICROS * 3

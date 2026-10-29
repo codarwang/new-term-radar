@@ -57,6 +57,14 @@ def _num(row: dict, *keys) -> int | None:
     return None
 
 
+def _numf(row: dict, *keys) -> float | None:
+    for k in keys:
+        v = row.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+    return None
+
+
 def _gl(location_code) -> str:
     """DataForSEO numeric location → web.cafe's `gl` country code."""
     if not location_code:
@@ -235,8 +243,14 @@ class WebCafe(_Provider):
                 # DFS monthly_searches is newest-first and upstream labels the
                 # estimate with ms[0]; webcafe lists oldest→newest
                 ms.reverse()
+                # avgCpc rides along so usecases can persist the bid — the
+                # keyword ledger surfaces CPC as a standard column and the
+                # upstream row already paid for it. Absent bid → key omitted,
+                # same as DFS omitting the field.
+                cpc = _numf(row, "avgCpc", "cpc")
                 result.append({"keyword": kw,
                                "search_volume": _num(row, "avg", "search_volume", "volume"),
+                               **({"cpc": cpc} if cpc is not None else {}),
                                "monthly_searches": ms})
         return {"status_code": 20000, "result": result}, micros
 
