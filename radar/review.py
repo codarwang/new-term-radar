@@ -113,9 +113,12 @@ def _remote_due(conn: sqlite3.Connection, room: int, after_days: int, seen: set[
         return []
     conn.execute(_REMOTE_ATTEMPTS)
     try:
+        # UA matters: Cloudflare managed rules 403 the default
+        # Python-urllib/x.y signature before the request ever reaches auth
         req = urllib.request.Request(
             f"{base}/api/accuracy-due?limit={room * 2 + 10}&after_days={after_days}",
-            headers={"Authorization": f"Bearer {secret}"})
+            headers={"Authorization": f"Bearer {secret}",
+                     "User-Agent": "hintprobe-radar/1.0"})
         items = json.loads(urllib.request.urlopen(req, timeout=30).read()).get("items", [])
     except Exception:
         return []
