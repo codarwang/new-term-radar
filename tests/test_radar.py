@@ -570,7 +570,7 @@ def _fake_usecase_network(monkeypatch):
     monkeypatch.setattr(usecases, "fetch_series", lambda keywords, bench, today: (
         {k: {"solo": rise if k == "synthid detector" else flat,
              "pair": [(d, v, 40) for d, v in (rise if k == "synthid detector" else flat)]} for k in keywords}, 7200, []))
-    monkeypatch.setattr(usecases, "fill_cpc", lambda rows, loc: [])
+    monkeypatch.setattr(usecases, "fill_cpc", lambda rows, loc, *a, **k: [])
 
 
 def test_usecases_run_builds_one_table_and_reads_a_name_twice(cfg, tmp_path, monkeypatch):
@@ -633,9 +633,34 @@ def test_fill_cpc_lists_row_errors_and_pool_death_stops(monkeypatch):
         usecases.fill_cpc(rows[2:], 2840)
 
 
+def test_fill_cpc_daily_budget_caps_shared_pool(tmp_path, monkeypatch):
+    """the state-file counter is a hard ceiling across entry points: a run at
+    the cap stops before ideas() is even called, and the count persists so
+    the next process (demand-sweep) sees the same spend."""
+    import json as j
+    rows = [{"phrase": "a"}, {"phrase": "b"}, {"phrase": "c"}]
+    calls = []
+    monkeypatch.setattr(usecases.webtool, "ideas",
+                        lambda kw, gl: (calls.append(kw), {"cpc": 1.0})[1])
+    # 2 of 3 rows fit under a cap of 2 — the third is deferred, not fetched
+    errs = usecases.fill_cpc(rows, 2840, tmp_path, max_per_day=2,
+                             today=usecases.date(2026, 10, 30))
+    assert calls == ["a", "b"] and [r.get("cpc") for r in rows] == [1.0, 1.0, None]
+    assert errs == ["daily cpc budget 2 reached — later rows unfilled"]
+    # the file records today's spend — a "next run" the same day starts at 2/2
+    assert j.loads((tmp_path / "cpc-budget.json").read_text())["calls"] == 2
+    errs2 = usecases.fill_cpc([{"phrase": "d"}], 2840, tmp_path, max_per_day=2,
+                              today=usecases.date(2026, 10, 30))
+    assert calls == ["a", "b"] and errs2 == ["daily cpc budget 2 reached — later rows unfilled"]
+    # a new day resets — the deferred row gets its call
+    usecases.fill_cpc(rows[2:], 2840, tmp_path, max_per_day=2,
+                      today=usecases.date(2026, 10, 31))
+    assert calls[-1] == "c" and rows[2]["cpc"] == 1.0
+
+
 def test_usecases_run_reports_cpc_errors(cfg, tmp_path, monkeypatch):
     _fake_usecase_network(monkeypatch)
-    monkeypatch.setattr(usecases, "fill_cpc", lambda rows, loc: ["x: boom"])
+    monkeypatch.setattr(usecases, "fill_cpc", lambda rows, loc, *a, **k: ["x: boom"])
     assert usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY)["cpc_errors"] == ["x: boom"]
 
 

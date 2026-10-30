@@ -290,23 +290,48 @@ def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], in
     return out, 0, errors
 
 
-def fill_cpc(rows: list[dict], location_code: int) -> list[str]:
+def fill_cpc(rows: list[dict], location_code: int, state: Path | None = None,
+             max_per_day: int = 15, today: date | None = None) -> list[str]:
     """row["cpc"] from the ideas Ads-snapshot lookup — one call per row, so it
     must run on the kept rows only (~15/run), never on the proposed pool.
     A word the planner library doesn't cover stays absent — the ingest
-    coalesce keeps any earlier reading rather than erasing it with null."""
+    coalesce keeps any earlier reading rather than erasing it with null.
+
+    Daily budget: state/cpc-budget.json counts every ideas() attempt against
+    the calendar date — the daily run and demand-sweep share the file, so
+    max_per_day (≈75cr at ~5cr/call) is a hard ceiling across entry points,
+    not a per-run estimate. At the cap, later rows simply keep their prior
+    cpc rather than overspending the shared gift pool."""
     errors = []
     gl = datasrc._gl(location_code)
+    day = (today or date.today()).isoformat()
+    bf = (state / "cpc-budget.json") if state else None
+    calls = 0
+    if bf:
+        try:
+            b = json.loads(bf.read_text())
+            calls = int(b.get("calls") or 0) if b.get("date") == day else 0
+        except (OSError, ValueError, TypeError):
+            calls = 0   # missing/corrupt budget reads as nothing spent — never unlocks extra
     for r in rows:
         if r.get("cpc") is not None:
             continue
+        if bf and calls >= max_per_day:
+            errors.append(f"daily cpc budget {max_per_day} reached — later rows unfilled")
+            break
         try:
             x = webtool.ideas(r["phrase"], gl)
         except (webtool.PoolExhausted, webtool.WalletSpend):
             raise   # dead pool or real money moved — stop, don't half-fill a table
         except webtool.WebToolError as exc:
+            calls += 1  # a failed attempt likely still burned quota — count it
             errors.append(f"{r['phrase']}: {exc}")
             continue
+        calls += 1
+        if bf:
+            tmp = bf.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"date": day, "calls": calls}))
+            tmp.replace(bf)  # atomic on POSIX — a crash mid-write can't corrupt the counter
         if x and isinstance(x.get("cpc"), (int, float)):
             r["cpc"] = round(float(x["cpc"]), 2)
     return errors
@@ -559,7 +584,8 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
     generic = sorted((dict(r, **vol[p]) for p, r in proposed.items() if vol.get(p, {}).get("volume", 0) >= c["min_volume"]),
                      key=lambda r: -r["volume"])[:c["trends_max"]]
     rows = [{"term": n, "phrase": n, "kind": "name", "names": [], "brand": True, "evidence": "", **vol.get(n, {})} for n in todo] + generic
-    cpc_errors = fill_cpc(rows, c["location_code"]) if c.get("cpc", True) else []
+    cpc_errors = fill_cpc(rows, c["location_code"], state,
+                          c.get("cpc_max_per_day", 15), today) if c.get("cpc", True) else []
     series, c3, series_errors = fetch_series([r["phrase"] for r in rows], bench, today)
     local, c4, local_errors = country_series(rows, c) if c.get("country_trends", True) else ({}, 0, [])
     daily = measure(rows, series, c["min_daily"], today, local)
