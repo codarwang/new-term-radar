@@ -39,7 +39,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import asks, breakout, config, gsc, new_sites, notify, pains, report, review, revenue, sitemaps, sources, store, usecases
+from . import asks, breakout, config, gsc, new_sites, notify, pains, report, review, revenue, sitemaps, sources, store, usecases, webtool
 from .i18n import t
 
 SKIPPABLE = {"x", "hf", "breakout", "sitemaps", "newsites", "revenue", "asks", "gsc", "review", "judge", "usecases", "tutorials"}
@@ -200,6 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         p.error(f"--skip: unknown {sorted(unknown)}")
     state = Path(args.state)
+    # the tool-lane daily budget ledger lives in the resolved state dir so
+    # --state and WEBTOOL_STATE_DIR agree on one shared counter
+    webtool.STATE_DIR = str(state)
     if args.command == "leads":
         return cmd_leads(args, state)
     if args.command == "keywords" and not args.names:

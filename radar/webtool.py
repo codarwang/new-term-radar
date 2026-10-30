@@ -14,8 +14,12 @@ client is anonymous and shares a 10-call IP pool with every other visitor of
 this machine's egress — fine for a smoke test, not for a pipeline.
 
 MONEY-SAFETY RAIL: when the gifted pool runs out, the site silently starts
-charging the paid wallet ("赠送已满，正在用积分余额"). Two guards prevent the
+charging the paid wallet ("赠送已满，正在用积分余额"). Three guards prevent the
 radar from ever spending a cent on this lane:
+  0. a local daily ledger (state/tool-budget.json) caps OUR share of the
+     shared pool at WEBTOOL_DAILY_MAX_CREDITS (default 300cr) — the user has
+     other uses for the 500/day, so the lane stops at its own budget even
+     while server-side quota remains;
   1. quota() is consulted before every call and the client refuses to fire when
      the call's worst-case charge could cross what the pool has left;
   2. every response's `charged` field is reconciled against the remaining pool —
@@ -34,6 +38,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+from datetime import date
+from pathlib import Path
 import threading
 import time
 import urllib.parse
@@ -53,6 +59,43 @@ TRIES = 2
 EST_MAX_CHARGE = 10
 UA_BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+# --- daily self-budget ---------------------------------------------------------
+# The VIP 500/day gift pool is shared with the user's other uses, so the lane
+# caps its OWN spend via a local ledger — PoolExhausted on breach, which every
+# call site already handles as "pool dead". This file is DISCIPLINE, not the
+# money rail: the server-side quota() pre-check + WalletSpend remain the real
+# guards (they see the user's spend too; this counter only sees ours).
+# WEBTOOL_DAILY_MAX_CREDITS overrides (0 = uncapped); WEBTOOL_STATE_DIR or
+# STATE_DIR (set by __main__ to the resolved --state dir) places the ledger —
+# demand-sweep and the daily run share it, so the cap is cross-process.
+STATE_DIR: str = os.environ.get("WEBTOOL_STATE_DIR", "state")
+TOOL_BUDGET_FILE = "tool-budget.json"
+DEFAULT_DAILY_CREDITS = 300.0   # of the VIP 500/day — leave headroom
+
+
+def _budget_path() -> Path:
+    return Path(STATE_DIR) / TOOL_BUDGET_FILE
+
+
+def _budget_spent(today: str) -> float:
+    try:
+        b = json.loads(open(_budget_path()).read())
+        return float(b.get("credits") or 0) if b.get("date") == today else 0.0
+    except (OSError, ValueError, TypeError):
+        return 0.0   # corrupt/missing reads as nothing spent — quota() stays the rail
+
+
+def _budget_charge(credits: float, today: str) -> None:
+    try:
+        p = _budget_path()
+        os.makedirs(os.path.dirname(str(p)), exist_ok=True)
+        tmp = str(p) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"date": today, "credits": _budget_spent(today) + credits}, f)
+        os.replace(tmp, p)
+    except OSError:
+        pass   # the ledger must never take the lane down — quota() is the rail
 
 # tool page path → (meta token name, header name)
 TOOLS = {
@@ -242,6 +285,18 @@ def _call(tool: str, method: str, path: str,
     if used + EST_MAX_CHARGE > limit:
         raise PoolExhausted(f"gifted pool low: {used}/{limit} credits "
                             f"({q.get('tier')}) — resets 08:00 CST")
+    # our own daily budget — the gift pool is shared with the user's other
+    # uses, so this lane stops at its own cap even while the pool has room
+    today = date.today().isoformat()
+    try:
+        cap = float(os.environ.get("WEBTOOL_DAILY_MAX_CREDITS", DEFAULT_DAILY_CREDITS))
+    except (TypeError, ValueError):
+        cap = DEFAULT_DAILY_CREDITS
+    spent_today = _budget_spent(today)
+    if cap > 0 and spent_today >= cap:
+        raise PoolExhausted(
+            f"daily tool budget spent: {spent_today:.0f}/{cap:.0f} credits "
+            f"(WEBTOOL_DAILY_MAX_CREDITS) — resets tomorrow")
     _, header = TOOLS[tool]
     token = "" if _use_ego() else (_tokens.get(tool) or _page_token(tool))
     last_error = ""
@@ -289,6 +344,14 @@ def _call(tool: str, method: str, path: str,
             used += spent
             if _quota_cache:
                 _quota_cache[1]["used"] = used
+        # ledger the call against our daily budget — a missing `charged`
+        # field counts as the worst case, never as free
+        try:
+            credited = float(charged) if charged is not None else EST_MAX_CHARGE
+        except (TypeError, ValueError):
+            credited = EST_MAX_CHARGE
+        if credited > 0:
+            _budget_charge(credited, today)
         return data
     raise WebToolError(last_error or f"{path}: all {TRIES} tries failed")
 

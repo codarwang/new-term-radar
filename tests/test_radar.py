@@ -1186,6 +1186,64 @@ def test_ideas_exact_match_returns_metrics_and_unknown_returns_none(monkeypatch)
     assert _webtool.ideas("mystery") is None
 
 
+def _stub_tool_lane(monkeypatch, tmp_path, charged=5):
+    """webtool._call with every transport seam stubbed — each call 'costs'
+    `charged` credits and returns a minimal valid payload."""
+    calls = []
+    monkeypatch.setattr(_webtool, "quota", lambda force=False: {"used": 0, "limit": 500})
+    monkeypatch.setattr(_webtool, "_use_ego", lambda: False)
+    monkeypatch.setattr(_webtool, "_page_token", lambda tool: "tok")
+    monkeypatch.setattr(_webtool, "_tokens", {})
+    monkeypatch.setattr(_webtool, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(_webtool, "_request",
+                        lambda method, url, body=None, headers=None:
+                        (calls.append(url), (200, json.dumps({"charged": charged, "data": {"ok": True}})))[1])
+    return calls
+
+
+def test_tool_daily_budget_ledger_charges_and_caps(tmp_path, monkeypatch):
+    """the local ledger counts real `charged` values per calendar day and
+    PoolExhausted fires at the cap — before any request goes out."""
+    import pytest as pt
+    calls = _stub_tool_lane(monkeypatch, tmp_path, charged=5)
+    monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", "10")
+    for _ in range(2):                       # 5+5 = 10 → at cap
+        _webtool._call("kd", "GET", "/kd/api/kd", params={"keyword": "x"})
+    with pt.raises(_webtool.PoolExhausted, match="daily tool budget"):
+        _webtool._call("kd", "GET", "/kd/api/kd", params={"keyword": "y"})
+    assert len(calls) == 2                   # the capped call never fired
+    b = json.loads((tmp_path / "tool-budget.json").read_text())
+    assert b["credits"] == 10.0
+
+
+def test_tool_daily_budget_missing_charged_counts_worst_case(tmp_path, monkeypatch):
+    """a response without `charged` budgets as EST_MAX_CHARGE — unknown spend
+    must never read as free."""
+    import pytest as pt
+    calls = _stub_tool_lane(monkeypatch, tmp_path, charged=None)
+    # the stub returns a payload without the charged key at all
+    monkeypatch.setattr(_webtool, "_request",
+                        lambda method, url, body=None, headers=None:
+                        (calls.append(url), (200, json.dumps({"data": {}})))[1])
+    monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", str(_webtool.EST_MAX_CHARGE))
+    _webtool._call("kd", "GET", "/kd/api/kd", params={})
+    with pt.raises(_webtool.PoolExhausted):
+        _webtool._call("kd", "GET", "/kd/api/kd", params={})
+    assert len(calls) == 1
+
+
+def test_tool_daily_budget_resets_next_day_and_corrupt_reads_zero(tmp_path, monkeypatch):
+    """a new day gets a fresh counter; a corrupt file is 0 spent, not a lockout."""
+    calls = _stub_tool_lane(monkeypatch, tmp_path, charged=5)
+    monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", "10")
+    bf = tmp_path / "tool-budget.json"
+    bf.write_text(json.dumps({"date": "1999-01-01", "credits": 999}))
+    _webtool._call("kd", "GET", "/kd/api/kd", params={})   # yesterday's spend doesn't count
+    bf.write_text("{corrupt")
+    _webtool._call("kd", "GET", "/kd/api/kd", params={})   # corrupt → 0 spent, lane stays up
+    assert len(calls) == 2
+
+
 def test_datasrc_call_is_a_loud_stub_not_a_provider(monkeypatch):
     """Keyword metrics live on webtool.* — any post_dataforseo_* call reaching
     datasrc.call (e.g. aisa.call delegating with no router creds) fails loud,
