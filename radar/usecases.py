@@ -268,10 +268,11 @@ def relevant(cands: list[dict]) -> list[dict]:
 def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], int, list[str]]:
     """{phrase: {"volume", "month", "_audit"}} — one free webtool.kd audit per
     phrase carries volume + SERP + kd score; the raw audit rides the row for
-    competition.assess to consume (one call, two consumers). CPC has no free
-    source — the field is absent rather than paid for. Cost is always 0:
-    a dead pool raises and stops the stage; other failures are per-phrase
-    errors listed under the table."""
+    competition.assess to consume (one call, two consumers). CPC comes from a
+    separate ideas lookup in fill_cpc — it runs post-filter on rows only, not
+    on the whole proposed pool. Cost is always 0: a dead pool raises and
+    stops the stage; other failures are per-phrase errors listed under the
+    table."""
     out, errors = {}, []
     gl = datasrc._gl(location_code)
     month_now = date.today().isoformat()[:7]
@@ -287,6 +288,28 @@ def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], in
                   "month": str(a.get("computed_at") or "")[:7] or month_now,
                   "_audit": a}
     return out, 0, errors
+
+
+def fill_cpc(rows: list[dict], location_code: int) -> list[str]:
+    """row["cpc"] from the ideas Ads-snapshot lookup — one call per row, so it
+    must run on the kept rows only (~15/run), never on the proposed pool.
+    A word the planner library doesn't cover stays absent — the ingest
+    coalesce keeps any earlier reading rather than erasing it with null."""
+    errors = []
+    gl = datasrc._gl(location_code)
+    for r in rows:
+        if r.get("cpc") is not None:
+            continue
+        try:
+            x = webtool.ideas(r["phrase"], gl)
+        except webtool.PoolExhausted:
+            raise   # the shared pool is dead — stop, don't half-fill a table
+        except webtool.WebToolError as exc:
+            errors.append(f"{r['phrase']}: {exc}")
+            continue
+        if x and isinstance(x.get("cpc"), (int, float)):
+            r["cpc"] = round(float(x["cpc"]), 2)
+    return errors
 
 
 WORLD = {"unsettled": review.UNSETTLED_DAYS, "window": 30, "factor": review.RISE_FACTOR, "days": 2}
@@ -536,6 +559,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
     generic = sorted((dict(r, **vol[p]) for p, r in proposed.items() if vol.get(p, {}).get("volume", 0) >= c["min_volume"]),
                      key=lambda r: -r["volume"])[:c["trends_max"]]
     rows = [{"term": n, "phrase": n, "kind": "name", "names": [], "brand": True, "evidence": "", **vol.get(n, {})} for n in todo] + generic
+    cpc_errors = fill_cpc(rows, c["location_code"]) if c.get("cpc", True) else []
     series, c3, series_errors = fetch_series([r["phrase"] for r in rows], bench, today)
     local, c4, local_errors = country_series(rows, c) if c.get("country_trends", True) else ({}, 0, [])
     daily = measure(rows, series, c["min_daily"], today, local)
@@ -557,6 +581,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
             "related": use_related, "tails": {n: v for n, v in tails.items() if v}, "cosearch": cosearch,
             "related_errors": related_errors, "geo": c["related_geo"], "country_errors": local_errors,
             "series_errors": series_errors, "volume_errors": vol_errors,
+            "cpc_errors": cpc_errors,
             "competition_errors": comp_errors, "cost_micros": cost + c2 + c3 + c4 + c5}
 
 

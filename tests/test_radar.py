@@ -570,6 +570,7 @@ def _fake_usecase_network(monkeypatch):
     monkeypatch.setattr(usecases, "fetch_series", lambda keywords, bench, today: (
         {k: {"solo": rise if k == "synthid detector" else flat,
              "pair": [(d, v, 40) for d, v in (rise if k == "synthid detector" else flat)]} for k in keywords}, 7200, []))
+    monkeypatch.setattr(usecases, "fill_cpc", lambda rows, loc: [])
 
 
 def test_usecases_run_builds_one_table_and_reads_a_name_twice(cfg, tmp_path, monkeypatch):
@@ -595,6 +596,47 @@ def test_keyword_table_marks_brands_and_generic_terms_become_leads(cfg, tmp_path
     assert "“check if any image is AI generated”" in text
     leads = report.usecase_leads(uc)
     assert [x["term"] for x in leads] == ["ai image detector", "photoshop alternative"] and leads[0]["kinds"] == ["usecase"]
+
+
+def test_fill_cpc_annotates_rows_and_survives_gaps(monkeypatch):
+    """fill_cpc: ideas() hits land cpc on the row; library misses and pre-set
+    values are left alone — never a fabricated zero."""
+    rows = [{"phrase": "ai headshot"}, {"phrase": "unknown word"}, {"phrase": "pre-set", "cpc": 2.0}]
+    calls = []
+
+    def ideas(kw, gl):
+        calls.append(kw)
+        if kw == "ai headshot":
+            return {"cpc": 7.551, "volume": 8100}
+        if kw == "unknown word":
+            return None
+        raise AssertionError("pre-set rows must not be re-fetched")
+    monkeypatch.setattr(usecases.webtool, "ideas", ideas)
+    assert usecases.fill_cpc(rows, 2840) == []
+    assert rows[0]["cpc"] == 7.55 and "cpc" not in rows[1] and rows[2]["cpc"] == 2.0
+    assert calls == ["ai headshot", "unknown word"]
+
+
+def test_fill_cpc_lists_row_errors_and_pool_death_stops(monkeypatch):
+    import pytest
+    rows = [{"phrase": "a"}, {"phrase": "b"}, {"phrase": "c"}]
+
+    def ideas(kw, gl):
+        if kw == "b":
+            raise usecases.webtool.WebToolError("HTTP 500")
+        if kw == "c":
+            raise usecases.webtool.PoolExhausted("gifted pool low")
+        return {"cpc": 1.5}
+    monkeypatch.setattr(usecases.webtool, "ideas", ideas)
+    assert usecases.fill_cpc(rows[:2], 2840) == ["b: HTTP 500"] and rows[0]["cpc"] == 1.5
+    with pytest.raises(usecases.webtool.PoolExhausted):
+        usecases.fill_cpc(rows[2:], 2840)
+
+
+def test_usecases_run_reports_cpc_errors(cfg, tmp_path, monkeypatch):
+    _fake_usecase_network(monkeypatch)
+    monkeypatch.setattr(usecases, "fill_cpc", lambda rows, loc: ["x: boom"])
+    assert usecases.run(cfg, tmp_path, ["synthid detector"], {}, TODAY)["cpc_errors"] == ["x: boom"]
 
 
 def test_review_ignores_the_unsettled_days(cfg, tmp_path, monkeypatch):
@@ -1095,8 +1137,28 @@ def test_tutorial_asks_only_for_leads_marked_one_click(cfg, monkeypatch):
 
 # --- datasrc: the paid provider layer is gone — call() is a loud stub ---------
 
-from radar import datasrc, aisa as _aisa  # noqa: E402
+from radar import datasrc, aisa as _aisa, webtool as _webtool  # noqa: E402
 import pytest as _pytest  # noqa: E402
+
+
+def test_ideas_exact_match_returns_metrics_and_unknown_returns_none(monkeypatch):
+    """webtool.ideas: the expander echoes a covered seed back as a plain item —
+    exact-match on normalized keyword; near-misses and unknown words are not
+    silently returned as the seed's metrics."""
+    def call(tool, method, path, body=None, params=None):
+        if body["seeds"] == ["mystery"]:
+            return {"items": [{"keyword": "mystery shopper", "cpc": 1.0}]}
+        return {"items": [{"keyword": "claude code alternative", "cpc": 9.9},
+                          {"keyword": "Claude  Code ", "volume": 550000, "cpc": 5.04,
+                           "lowBid": 1.2, "highBid": 8.0, "competition": 0.7,
+                           "competitionLevel": "MEDIUM", "kd": 55,
+                           "intent": "commercial", "months": [{"ym": "2026-09", "v": 1}],
+                           "trend": {"dir": "rising"}}]}
+    monkeypatch.setattr(_webtool, "_call", call)
+    x = _webtool.ideas("claude code")
+    assert x["cpc"] == 5.04 and x["low_bid"] == 1.2 and x["kd_prescreen"] == 55
+    assert x["competition_level"] == "MEDIUM" and x["intent"] == "commercial"
+    assert _webtool.ideas("mystery") is None
 
 
 def test_datasrc_call_is_a_loud_stub_not_a_provider(monkeypatch):

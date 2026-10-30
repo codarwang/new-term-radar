@@ -384,3 +384,33 @@ def related_queries(term: str, geo: str = "US") -> dict[str, list[str]]:
                        for x in xs if isinstance(x, dict)]  # noqa: E731
     return {"rising": norm(d["related"].get("rising") or []),
             "top": norm(d["related"].get("top") or [])}
+
+
+def ideas(keyword: str, gl: str = "us") -> dict | None:
+    """Ads-snapshot metrics for ONE keyword through the ideas expander —
+    the free lane's only CPC/bids source (kd audits don't carry them).
+    {volume, cpc, low_bid, high_bid, competition, competition_level,
+    kd_prescreen, intent, months, trend} or None when the planner library
+    doesn't know the word at all (the honest answer, same as kd's gaps).
+
+    The tool expands seeds into its ~2M-keyword monthly Ads snapshot; the
+    seed itself comes back as a plain item whenever the library covers it,
+    so one seed per call + exact-match is the reliable lookup shape (multi-
+    seed calls dilute the per-seed budget and silently drop exacts). `kd`
+    here is a PRE-SCREEN score on a different scale from kd() audits — the
+    tool's own note says海选 only, don't compare across the two scales."""
+    d = _call("ideas", "POST", f"{BASE_PATH}/ideas/api/ideas",
+              body={"seeds": [keyword], "mode": "suggestions", "gl": gl,
+                    "limit": 5, "minVolume": 0, "maxKd": None})
+    want = " ".join(keyword.lower().split())
+    for x in d.get("items") or []:
+        if not isinstance(x, dict):
+            continue
+        if " ".join(str(x.get("keyword") or "").lower().split()) == want:
+            return {"volume": x.get("volume"), "cpc": x.get("cpc"),
+                    "low_bid": x.get("lowBid"), "high_bid": x.get("highBid"),
+                    "competition": x.get("competition"),
+                    "competition_level": x.get("competitionLevel"),
+                    "kd_prescreen": x.get("kd"), "intent": x.get("intent"),
+                    "months": x.get("months") or [], "trend": x.get("trend") or {}}
+    return None
