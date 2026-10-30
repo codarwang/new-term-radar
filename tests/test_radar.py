@@ -378,6 +378,29 @@ def test_variant_series_rejects_a_coarser_than_daily_grain(monkeypatch):
     assert review._variant_series("x", SEEN, TODAY, 14) is None   # ~6 points can't judge a 14-day window
 
 
+def test_review_lazy_variants_only_run_while_prior_keys_are_no_data(cfg, tmp_path, monkeypatch):
+    """variants are a no_data fallback: once a key yields a real verdict the
+    rest of the spread is skipped — a hit locks, and a miss on the term can no
+    longer be overturned by a synonym's rise (deliberate tightening of what
+    "the call rose" means)."""
+    conn = store.connect(tmp_path)
+    store.record(conn, [_lead("term one", ["x"], variants=["term one", "syn a", "syn b"]),
+                        _lead("term two", ["x"], variants=["term two", "syn c"])],
+                 date(2026, 9, 25))
+    calls = []
+    rising = _series([0] * 9 + [30, 30, 100, 0, 0])
+    def fake_series(kw, geo, rng):
+        calls.append(kw)
+        return rising if kw != "term two" else []
+    monkeypatch.setattr(review.webtool, "series", fake_series)
+    out = review.review(cfg, conn, date(2026, 10, 10))
+    v = {r["term"]: r["verdict"] for r in out["checked"]}
+    assert v == {"term one": "hit", "term two": "hit"}
+    # term one judged on its own data → syn a/syn b never queried;
+    # term two came back empty → fell through to its variant
+    assert calls == ["term one", "term two", "syn c"]
+
+
 def test_review_stores_the_verdict(cfg, tmp_path, monkeypatch):
     conn = store.connect(tmp_path)
     store.record(conn, [_lead("niko strata", ["breakout"])], SEEN)

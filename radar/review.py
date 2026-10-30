@@ -31,7 +31,7 @@ from datetime import date, timedelta
 from . import store, webtool
 
 BEFORE_DAYS = 30
-MAX_VARIANTS = 3      # each variant is one trends call on the gift pool
+MAX_VARIANTS = 3      # one trends call each — variants only run while prior keys are all no_data
 RISE_FACTOR, RISE_MIN = 2.0, 10
 RISE_SHARE = 0.25     # the rise starts where a series first covers this share of base -> peak
 # Google has not settled the last two days of a daily series: they come back as 0 and
@@ -197,6 +197,13 @@ def review(cfg: dict, conn: sqlite3.Connection, today: date | None = None) -> di
         keys = (list(variants) or [term])[:MAX_VARIANTS]
         per, failed = {}, False
         for k in keys:
+            # lazy ladder: variants only run while every prior key is no_data —
+            # the term that surfaced is what's being scored, so a real verdict
+            # on it locks the call (later keys could only shave lead_days or
+            # let a synonym override the term's own trajectory). Saves ~2/3 of
+            # review's trends calls vs querying all MAX_VARIANTS up front.
+            if per and not all(v.get("no_data") for v in per.values()):
+                break
             try:
                 pts = _variant_series(k, first_seen, today, c["after_days"])
             except (webtool.PoolExhausted, webtool.WalletSpend):

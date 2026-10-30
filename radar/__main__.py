@@ -111,6 +111,11 @@ def cmd_daily(args, cfg: dict, state: Path) -> int:
     summ = run(lambda: store.summary(conn))
     text = report.daily(cfg, lead, blocks, found, rev, summ, extra)
     if args.out:
+        try:
+            q = webtool.quota()   # gift-pool gauge → job_runs.stats.giftPoolUsed
+            summ = dict(summ, gift_pool_used=q.get("used"), gift_pool_limit=q.get("limit"))
+        except Exception:
+            pass   # observability only — api/me must never fail the report
         Path(args.out).with_suffix(".json").write_text(json.dumps(
             {"leads": lead, **blocks, "gsc": found, "review": rev, "summary": summ, "keywords": extra["usecases"]}, ensure_ascii=False, indent=1, default=str))
     _finish(args, text, f"New-term radar {date.today()}")
