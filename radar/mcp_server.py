@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import __main__ as cli
 from . import config
+from . import webtool
 
 try:                                   # mcp 2.x
     from mcp.server.mcpserver import MCPServer
@@ -42,7 +43,9 @@ server = MCPServer(
 
 
 def _paths() -> tuple[Path, Path]:
-    return Path(os.environ.get("RADAR_CONFIG", "config.json")), Path(os.environ.get("RADAR_STATE", "state"))
+    cfg, state = Path(os.environ.get("RADAR_CONFIG", "config.json")), Path(os.environ.get("RADAR_STATE", "state"))
+    webtool.STATE_DIR = os.environ.get("WEBTOOL_STATE_DIR") or str(state)   # ledger on RADAR_STATE too
+    return cfg, state
 
 
 def _quiet(fn, *args):

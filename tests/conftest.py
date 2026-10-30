@@ -6,9 +6,10 @@ from radar import aisa, config, goanyapi, i18n, webtool
 
 
 @pytest.fixture(autouse=True)
-def english(monkeypatch):
+def english(monkeypatch, tmp_path):
     i18n.set_lang("en")
     monkeypatch.delenv("GOANYAPI_API_KEY", raising=False)   # the optional source is off unless a test turns it on
+    monkeypatch.setattr(webtool, "STATE_DIR", str(tmp_path))   # budget tests must never touch the real ledger
 
     def no_network(*a, **k):
         raise goanyapi.GoAnyError("no network in tests")

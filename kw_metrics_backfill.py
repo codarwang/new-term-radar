@@ -4,6 +4,9 @@ per keyword, then emit UPDATE statements for D1. No paid API anywhere.
 
 Usage: uv run python kw_metrics_backfill.py > /tmp/kw_metrics.sql
 Reads /tmp/backfill-kws.json — [[keyword, keyword_slug], ...]
+Run from the vendor root so the tool-budget ledger lands in ./state/ and
+shares the WEBTOOL_DAILY_MAX_CREDITS cap with the daily chain (or export
+WEBTOOL_STATE_DIR).
 """
 import json
 import os

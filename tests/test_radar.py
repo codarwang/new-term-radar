@@ -1204,12 +1204,11 @@ def _stub_tool_lane(monkeypatch, tmp_path, charged=5):
 def test_tool_daily_budget_ledger_charges_and_caps(tmp_path, monkeypatch):
     """the local ledger counts real `charged` values per calendar day and
     PoolExhausted fires at the cap — before any request goes out."""
-    import pytest as pt
     calls = _stub_tool_lane(monkeypatch, tmp_path, charged=5)
     monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", "10")
     for _ in range(2):                       # 5+5 = 10 → at cap
         _webtool._call("kd", "GET", "/kd/api/kd", params={"keyword": "x"})
-    with pt.raises(_webtool.PoolExhausted, match="daily tool budget"):
+    with _pytest.raises(_webtool.PoolExhausted, match="daily tool budget"):
         _webtool._call("kd", "GET", "/kd/api/kd", params={"keyword": "y"})
     assert len(calls) == 2                   # the capped call never fired
     b = json.loads((tmp_path / "tool-budget.json").read_text())
@@ -1219,29 +1218,63 @@ def test_tool_daily_budget_ledger_charges_and_caps(tmp_path, monkeypatch):
 def test_tool_daily_budget_missing_charged_counts_worst_case(tmp_path, monkeypatch):
     """a response without `charged` budgets as EST_MAX_CHARGE — unknown spend
     must never read as free."""
-    import pytest as pt
-    calls = _stub_tool_lane(monkeypatch, tmp_path, charged=None)
+    calls = _stub_tool_lane(monkeypatch, tmp_path)
     # the stub returns a payload without the charged key at all
     monkeypatch.setattr(_webtool, "_request",
                         lambda method, url, body=None, headers=None:
                         (calls.append(url), (200, json.dumps({"data": {}})))[1])
     monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", str(_webtool.EST_MAX_CHARGE))
     _webtool._call("kd", "GET", "/kd/api/kd", params={})
-    with pt.raises(_webtool.PoolExhausted):
+    with _pytest.raises(_webtool.PoolExhausted):
         _webtool._call("kd", "GET", "/kd/api/kd", params={})
     assert len(calls) == 1
 
 
+def test_tool_daily_budget_ledgers_billed_error_payloads(tmp_path, monkeypatch):
+    """an error payload that still carried `charged` is ledgered before the
+    WebToolError raise — error responses can bill too."""
+    calls = _stub_tool_lane(monkeypatch, tmp_path)
+    monkeypatch.setattr(_webtool, "_request",
+                        lambda method, url, body=None, headers=None:
+                        (calls.append(url),
+                         (200, json.dumps({"error": "rate limited", "charged": 5})))[1])
+    monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", "100")
+    with _pytest.raises(_webtool.WebToolError, match="rate limited"):
+        _webtool._call("kd", "GET", "/kd/api/kd", params={})
+    b = json.loads((tmp_path / "tool-budget.json").read_text())
+    assert b["credits"] == 5.0   # billed errors count against the day
+
+
 def test_tool_daily_budget_resets_next_day_and_corrupt_reads_zero(tmp_path, monkeypatch):
-    """a new day gets a fresh counter; a corrupt file is 0 spent, not a lockout."""
+    """a new day gets a fresh counter; a corrupt file — including valid-but-
+    non-dict JSON ("[]", null) — is 0 spent, not a lockout."""
     calls = _stub_tool_lane(monkeypatch, tmp_path, charged=5)
-    monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", "10")
+    monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", "100")
     bf = tmp_path / "tool-budget.json"
     bf.write_text(json.dumps({"date": "1999-01-01", "credits": 999}))
     _webtool._call("kd", "GET", "/kd/api/kd", params={})   # yesterday's spend doesn't count
-    bf.write_text("{corrupt")
-    _webtool._call("kd", "GET", "/kd/api/kd", params={})   # corrupt → 0 spent, lane stays up
-    assert len(calls) == 2
+    for garbage in ("{corrupt", "[]", "null", '"oops"'):
+        bf.write_text(garbage)
+        _webtool._call("kd", "GET", "/kd/api/kd", params={})   # corrupt → 0 spent, lane stays up
+    assert len(calls) == 5
+
+
+def test_tool_daily_budget_cap_env_edge_cases(tmp_path, monkeypatch):
+    """cap env: 0 = uncapped (past spend ignored); nan/negative/inf are invalid
+    input → fall back to the default cap, not to uncapped."""
+    calls = _stub_tool_lane(monkeypatch, tmp_path, charged=5)
+    bf = tmp_path / "tool-budget.json"
+    bf.write_text(json.dumps({"date": __import__("datetime").date.today().isoformat(),
+                              "credits": 999}))            # way over any cap
+    monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", "0")
+    _webtool._call("kd", "GET", "/kd/api/kd", params={})   # 0 → uncapped, fires
+    for bad in ("nan", "-5", "inf", "abc"):
+        bf.write_text(json.dumps({"date": __import__("datetime").date.today().isoformat(),
+                                  "credits": 999}))
+        monkeypatch.setenv("WEBTOOL_DAILY_MAX_CREDITS", bad)
+        with _pytest.raises(_webtool.PoolExhausted):       # invalid → default 300, 999 spent
+            _webtool._call("kd", "GET", "/kd/api/kd", params={})
+    assert len(calls) == 1
 
 
 def test_datasrc_call_is_a_loud_stub_not_a_provider(monkeypatch):

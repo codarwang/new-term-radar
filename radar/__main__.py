@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -200,9 +201,9 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         p.error(f"--skip: unknown {sorted(unknown)}")
     state = Path(args.state)
-    # the tool-lane daily budget ledger lives in the resolved state dir so
-    # --state and WEBTOOL_STATE_DIR agree on one shared counter
-    webtool.STATE_DIR = str(state)
+    # the tool-lane daily budget ledger lives in the resolved state dir;
+    # WEBTOOL_STATE_DIR wins when set so an operator can point it elsewhere
+    webtool.STATE_DIR = os.environ.get("WEBTOOL_STATE_DIR") or str(state)
     if args.command == "leads":
         return cmd_leads(args, state)
     if args.command == "keywords" and not args.names:

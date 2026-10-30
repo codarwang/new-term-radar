@@ -310,8 +310,8 @@ def fill_cpc(rows: list[dict], location_code: int, state: Path | None = None,
     if bf:
         try:
             b = json.loads(bf.read_text())
-            calls = int(b.get("calls") or 0) if b.get("date") == day else 0
-        except (OSError, ValueError, TypeError):
+            calls = int(b.get("calls") or 0) if isinstance(b, dict) and b.get("date") == day else 0
+        except (OSError, ValueError, TypeError, OverflowError):
             calls = 0   # missing/corrupt budget reads as nothing spent — never unlocks extra
     for r in rows:
         if r.get("cpc") is not None:

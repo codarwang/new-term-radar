@@ -16,10 +16,10 @@ this machine's egress — fine for a smoke test, not for a pipeline.
 MONEY-SAFETY RAIL: when the gifted pool runs out, the site silently starts
 charging the paid wallet ("赠送已满，正在用积分余额"). Three guards prevent the
 radar from ever spending a cent on this lane:
-  0. a local daily ledger (state/tool-budget.json) caps OUR share of the
-     shared pool at WEBTOOL_DAILY_MAX_CREDITS (default 300cr) — the user has
-     other uses for the 500/day, so the lane stops at its own budget even
-     while server-side quota remains;
+  0. (self-imposed) a local daily ledger (state/tool-budget.json) caps OUR
+     share of the shared pool at WEBTOOL_DAILY_MAX_CREDITS (default 300cr) —
+     the user has other uses for the 500/day, so the lane stops at its own
+     budget even while server-side quota remains;
   1. quota() is consulted before every call and the client refuses to fire when
      the call's worst-case charge could cross what the pool has left;
   2. every response's `charged` field is reconciled against the remaining pool —
@@ -33,16 +33,18 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
-from datetime import date
-from pathlib import Path
 import threading
 import time
 import urllib.parse
+from datetime import date
+from pathlib import Path
 
 from . import UA
 
@@ -69,7 +71,7 @@ UA_BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 # WEBTOOL_DAILY_MAX_CREDITS overrides (0 = uncapped); WEBTOOL_STATE_DIR or
 # STATE_DIR (set by __main__ to the resolved --state dir) places the ledger —
 # demand-sweep and the daily run share it, so the cap is cross-process.
-STATE_DIR: str = os.environ.get("WEBTOOL_STATE_DIR", "state")
+STATE_DIR: str = os.environ.get("WEBTOOL_STATE_DIR") or "state"
 TOOL_BUDGET_FILE = "tool-budget.json"
 DEFAULT_DAILY_CREDITS = 300.0   # of the VIP 500/day — leave headroom
 
@@ -80,22 +82,47 @@ def _budget_path() -> Path:
 
 def _budget_spent(today: str) -> float:
     try:
-        b = json.loads(open(_budget_path()).read())
-        return float(b.get("credits") or 0) if b.get("date") == today else 0.0
-    except (OSError, ValueError, TypeError):
+        b = json.loads(_budget_path().read_text())
+        if not isinstance(b, dict):
+            return 0.0   # valid-but-non-dict JSON ("[]", null) is corrupt too
+        v = float(b.get("credits") or 0) if b.get("date") == today else 0.0
+        return v if math.isfinite(v) and v >= 0 else 0.0   # nan/inf/negative → corrupt
+    except (OSError, ValueError, TypeError, OverflowError):
         return 0.0   # corrupt/missing reads as nothing spent — quota() stays the rail
 
 
+def _credited(data) -> float:
+    """credits this response billed — a missing/unparseable `charged` field
+    counts as the worst case, never as free."""
+    ch = data.get("charged")
+    if ch is None:
+        return EST_MAX_CHARGE
+    try:
+        v = float(ch)
+    except (TypeError, ValueError, OverflowError):
+        return EST_MAX_CHARGE
+    return v if math.isfinite(v) and v >= 0 else EST_MAX_CHARGE
+
+
+_budget_warned = False
+_budget_lock = threading.Lock()   # callers fan out on ThreadPoolExecutor
+
+
 def _budget_charge(credits: float, today: str) -> None:
+    global _budget_warned
     try:
         p = _budget_path()
-        os.makedirs(os.path.dirname(str(p)), exist_ok=True)
-        tmp = str(p) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"date": today, "credits": _budget_spent(today) + credits}, f)
-        os.replace(tmp, p)
-    except OSError:
-        pass   # the ledger must never take the lane down — quota() is the rail
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f"{p}.{os.getpid()}.tmp"   # per-process tmp; threads share the lock
+        with _budget_lock:
+            with open(tmp, "w") as f:
+                json.dump({"date": today, "credits": _budget_spent(today) + credits}, f)
+            os.replace(tmp, p)
+    except OSError as e:
+        if not _budget_warned:
+            _budget_warned = True
+            print(f"webtool: budget write lost ({e}); ledger may under-count",
+                  file=sys.stderr)
 
 # tool page path → (meta token name, header name)
 TOOLS = {
@@ -139,7 +166,8 @@ class WalletSpend(WebToolError):
 
 
 class PoolExhausted(WebToolError):
-    """quota() reported used >= limit before the call was even attempted."""
+    """the lane must not fire: quota() reported the pool too low, or our own
+    daily budget ledger (tool-budget.json) is spent for the day."""
 
 
 _last_call = 0.0
@@ -277,6 +305,23 @@ def quota(force: bool = False) -> dict:
 def _call(tool: str, method: str, path: str,
           body: dict | None = None, params: dict | None = None) -> dict:
     """Authenticated tool call with quota + wallet guards and token refresh."""
+    # our own daily budget — the gift pool is shared with the user's other
+    # uses, so this lane stops at its own cap even while the pool has room.
+    # Checked before quota() — a spent ledger shouldn't cost an api/me call.
+    # Day keyed on local date, not the pool's 08:00-CST window — discipline,
+    # not the rail. `spent >= cap` pre-call lets one call overshoot its price.
+    today = date.today().isoformat()
+    try:
+        cap = float(os.environ.get("WEBTOOL_DAILY_MAX_CREDITS", DEFAULT_DAILY_CREDITS))
+    except (TypeError, ValueError):
+        cap = DEFAULT_DAILY_CREDITS
+    if cap != 0 and not (cap > 0 and math.isfinite(cap)):   # negative/nan/inf → default
+        cap = DEFAULT_DAILY_CREDITS
+    spent_today = _budget_spent(today)
+    if cap > 0 and spent_today >= cap:
+        raise PoolExhausted(
+            f"daily tool budget spent: {spent_today:.0f}/{cap:.0f} credits "
+            f"(WEBTOOL_DAILY_MAX_CREDITS) — resets tomorrow")
     q = quota()
     used, limit = q.get("used", 0), q.get("limit", 0)
     # the pool is CREDIT-denominated (a live trends call bills 4–8 credits):
@@ -285,18 +330,6 @@ def _call(tool: str, method: str, path: str,
     if used + EST_MAX_CHARGE > limit:
         raise PoolExhausted(f"gifted pool low: {used}/{limit} credits "
                             f"({q.get('tier')}) — resets 08:00 CST")
-    # our own daily budget — the gift pool is shared with the user's other
-    # uses, so this lane stops at its own cap even while the pool has room
-    today = date.today().isoformat()
-    try:
-        cap = float(os.environ.get("WEBTOOL_DAILY_MAX_CREDITS", DEFAULT_DAILY_CREDITS))
-    except (TypeError, ValueError):
-        cap = DEFAULT_DAILY_CREDITS
-    spent_today = _budget_spent(today)
-    if cap > 0 and spent_today >= cap:
-        raise PoolExhausted(
-            f"daily tool budget spent: {spent_today:.0f}/{cap:.0f} credits "
-            f"(WEBTOOL_DAILY_MAX_CREDITS) — resets tomorrow")
     _, header = TOOLS[tool]
     token = "" if _use_ego() else (_tokens.get(tool) or _page_token(tool))
     last_error = ""
@@ -323,6 +356,12 @@ def _call(tool: str, method: str, path: str,
             continue
         if data.get("error"):
             code = str(data.get("code") or "")
+            # error payloads may still have billed — ledger them; token-refresh
+            # churn only when it actually reports a charge (no phantom EST_MAX)
+            if code != "token" or data.get("charged") is not None:
+                c = _credited(data)
+                if c > 0:
+                    _budget_charge(c, today)
             if code == "token":
                 token = _page_token(tool)
                 continue
@@ -332,26 +371,24 @@ def _call(tool: str, method: str, path: str,
         # remaining headroom is real money: abort loudly, never "cost of doing
         # business". This is the rail that makes the lane safe to run unattended.
         charged = data.get("charged")
+        # ledger BEFORE the WalletSpend check — a wallet-drain call still spent
+        credited = _credited(data)
+        if credited > 0:
+            _budget_charge(credited, today)
         if charged not in (None, 0, "0", "0.0"):
             try:
                 spent = float(charged)
-            except (TypeError, ValueError):
-                spent = 0.0
+            except (TypeError, ValueError, OverflowError):
+                spent = EST_MAX_CHARGE   # unreadable charge → worst case, not free
+            if not math.isfinite(spent) or spent < 0:
+                spent = EST_MAX_CHARGE
             if spent > max(0.0, float(limit) - float(used)):
                 raise WalletSpend(f"{path} charged {charged} credits but only "
                                   f"{float(limit) - float(used):.0f} of the gift "
                                   f"pool was left — wallet drained; aborting")
-            used += spent
+            used += max(0.0, spent)   # a negative `charged` must not buy headroom
             if _quota_cache:
                 _quota_cache[1]["used"] = used
-        # ledger the call against our daily budget — a missing `charged`
-        # field counts as the worst case, never as free
-        try:
-            credited = float(charged) if charged is not None else EST_MAX_CHARGE
-        except (TypeError, ValueError):
-            credited = EST_MAX_CHARGE
-        if credited > 0:
-            _budget_charge(credited, today)
         return data
     raise WebToolError(last_error or f"{path}: all {TRIES} tries failed")
 
@@ -402,13 +439,12 @@ def trends(keywords: list[str], range: str = "30d", geo: str = "US",
 
 def series(keyword: str, geo: str = "US", range: str = "30d") -> list[tuple]:
     """[(date, value)] — drop-in for goanyapi.daily_series."""
-    from datetime import date as _date
     d = trends([keyword], range=range, geo=geo)
     out = []
     for p in d["points"]:
         try:
             v = p.get("value", (p.get("values") or [0])[0])
-            out.append((_date.fromisoformat(str(p.get("time") or "")[:10]), int(v)))
+            out.append((date.fromisoformat(str(p.get("time") or "")[:10]), int(v)))
         except (TypeError, ValueError, IndexError):
             continue
     return out
@@ -420,7 +456,6 @@ def pair_series(keyword: str, benchmark: str, range: str = "90d", geo: str = "")
     [keyword, benchmark] in one shot is exactly the old solo+pair pair of calls.
     solo renormalized to its own top reproduces the term-alone curve (Trends
     scaling is linear), pair rides the shared scale as before."""
-    from datetime import date as _date
     d = trends([keyword, benchmark], range=range, geo=geo)
     solo_raw, pair = [], []
     for p in d["points"]:
@@ -428,7 +463,7 @@ def pair_series(keyword: str, benchmark: str, range: str = "90d", geo: str = "")
             vals = p.get("values") or []
             if len(vals) < 2:                    # single-keyword shape fallback
                 vals = [p.get("value", 0), 0]
-            day = _date.fromisoformat(str(p.get("time") or "")[:10])
+            day = date.fromisoformat(str(p.get("time") or "")[:10])
             solo_raw.append((day, int(vals[0] or 0)))
             pair.append((day, int(vals[0] or 0), int(vals[1] or 0)))
         except (TypeError, ValueError, IndexError):
