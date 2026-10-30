@@ -266,7 +266,7 @@ def relevant(cands: list[dict]) -> list[dict]:
 
 
 def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], int, list[str]]:
-    """{phrase: {"volume", "month", "_audit"}} — one free webtool.kd audit per
+    """{phrase: {"volume", "month", "_audit"}} — one webtool.kd audit per
     phrase carries volume + SERP + kd score; the raw audit rides the row for
     competition.assess to consume (one call, two consumers). CPC comes from a
     separate ideas lookup in fill_cpc — it runs post-filter on rows only, not
@@ -484,7 +484,7 @@ def decide(s: dict, per_day: int | None, min_daily: int) -> str:
 
 def fetch_series(keywords: list[str], benchmark: str, today: date) -> tuple[dict[str, dict], int, list[str]]:
     """({keyword: {"solo": [(day, value)], "pair": [(day, value, benchmark value)]}}, cost_micros, errors):
-    one free trends call each — [k, benchmark] in a single request returns both
+    one trends call each — [k, benchmark] in a single request returns both
     series on a shared 0-100 scale. A keyword whose call fails is skipped and
     named in errors; a dead pool fails the run, it does not fake no_data."""
     out, errors = {}, []
@@ -549,7 +549,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
     tails: dict[str, list[str]] = {}
     cosearch: list[dict] = []
     related_errors: list[str] = []
-    # the free lane answers related-queries without a key at all
+    # the gift-pool lane answers related-queries without a key at all
     use_related = c.get("related", True)
     for name in todo:
         try:

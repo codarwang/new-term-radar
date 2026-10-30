@@ -1,7 +1,7 @@
 """Shared data-source helpers.
 
 Keyword metrics no longer go through a paid provider layer: volume, trends,
-SERP and KD all ride the free browser-tool lane (webtool.*). `call()` remains
+SERP and KD all ride the gift-pool tool lane (webtool.* — per-call gift credits). `call()` remains
 as a loud stub because aisa.call() still delegates here when no router
 credentials exist — any post_dataforseo_* tool call reaching it is a bug, and
 failing loud beats silently routing a metric to a billable endpoint.
@@ -13,7 +13,7 @@ from .aisa import AisaError
 
 def call(calls: list[dict], provider: str | None = None) -> tuple[dict, int]:
     raise AisaError(
-        "no data provider: keyword metrics moved to the free webtool lane "
+        "no data provider: keyword metrics moved to the gift-pool webtool lane "
         "(webtool.kd/series/pair_series) — a post_dataforseo_* call reaching "
         "this stub means a call site was not rewired")
 

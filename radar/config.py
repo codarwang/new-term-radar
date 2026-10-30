@@ -24,8 +24,8 @@ DEFAULTS = {
     # room leads leave); ~3 Trends tasks per call at ~$0.0035 each keeps the
     # daily review spend under half a dollar while the backlog drains
     "review": {"after_days": 14, "per_day": 40},
-    # cpc: per-kept-row /ideas/ exact-match lookup for the Ads bid (free
-    # lane, ~5cr/row on the gift pool) — false leaves demand_keywords.cpc
+    # cpc: per-kept-row /ideas/ exact-match lookup for the Ads bid
+    # (gift-pool lane, ~5cr/row on the VIP pool) — false leaves demand_keywords.cpc
     # null. cpc_max_per_day is a HARD ceiling shared by the daily run and
     # demand-sweep via state/cpc-budget.json (15 calls ≈ 75cr): the gift
     # pool has other uses, CPC is a nice-to-have signal, never overspend.

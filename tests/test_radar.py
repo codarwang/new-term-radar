@@ -1190,7 +1190,7 @@ def test_datasrc_call_is_a_loud_stub_not_a_provider(monkeypatch):
     """Keyword metrics live on webtool.* — any post_dataforseo_* call reaching
     datasrc.call (e.g. aisa.call delegating with no router creds) fails loud,
     never silently routes to a billable endpoint."""
-    with _pytest.raises(_aisa.AisaError, match="free webtool lane"):
+    with _pytest.raises(_aisa.AisaError, match="gift-pool webtool lane"):
         datasrc.call([{"call_id": "c", "tool": "post_dataforseo_x", "arguments": {}}])
 
 

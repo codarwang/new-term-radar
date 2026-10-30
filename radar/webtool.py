@@ -388,7 +388,7 @@ def related_queries(term: str, geo: str = "US") -> dict[str, list[str]]:
 
 def ideas(keyword: str, gl: str = "us") -> dict | None:
     """Ads-snapshot metrics for ONE keyword through the ideas expander —
-    the free lane's only CPC/bids source (kd audits don't carry them).
+    the lane's only CPC/bids source (kd audits don't carry them).
     {volume, cpc, low_bid, high_bid, competition, competition_level,
     kd_prescreen, intent, months, trend} or None when the planner library
     doesn't know the word at all (the honest answer, same as kd's gaps).

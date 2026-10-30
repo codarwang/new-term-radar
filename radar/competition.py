@@ -2,9 +2,9 @@
 
 Rising is not enough: a term whose first page is held by strong sites is a fight a new site
 loses. For the table's rows that would be acted on (prioritize, then watch), up to `max_rows`
-a run, this reads the free browser-tool audit — ONE webtool.kd() call per term carries the
+a run, this reads the gift-pool tool audit — ONE webtool.kd() call per term carries the
 whole picture: page-1 results with inline DR + monthly visits, the difficulty score, keyword
-volume, and the backlink budget. There is no paid lane: when the audit can't run the row
+volume, and the backlink budget. There is no paid lane (only the gift pool): when the audit can't run the row
 simply gets no competition block and the error is named in the report.
 
 `open`: three or more weak results, or difficulty under 20. `crowded`: no weak result and a

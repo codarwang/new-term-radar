@@ -1,5 +1,5 @@
 """One-off: backfill kd + cpc for the existing demand_keywords corpus via the
-FREE browser-tool lane — one webtool.kd audit plus one webtool.ideas lookup
+GIFT-POOL tool lane — one webtool.kd audit plus one webtool.ideas lookup
 per keyword, then emit UPDATE statements for D1. No paid API anywhere.
 
 Usage: uv run python kw_metrics_backfill.py > /tmp/kw_metrics.sql

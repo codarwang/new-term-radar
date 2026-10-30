@@ -1,8 +1,8 @@
 """The radar's review: check every lead in Google Trends two weeks later.
 
 review()  takes up to `per_day` leads first seen `after_days` ago or earlier and not yet
-          checked, reads each search variant's series through the FREE browser-tool
-          trends lane (webtool.series — no paid API anywhere), and stores
+          checked, reads each search variant's series through the gift-pool tool
+          lane (webtool.series — gift credits per call, no paid API), and stores
           hit / miss / no_data plus how many days the radar was ahead.
 
 Each variant is judged on its own 0-100 scale — the web tool accepts a range
@@ -31,7 +31,7 @@ from datetime import date, timedelta
 from . import store, webtool
 
 BEFORE_DAYS = 30
-MAX_VARIANTS = 3      # each variant is one free trends call
+MAX_VARIANTS = 3      # each variant is one trends call on the gift pool
 RISE_FACTOR, RISE_MIN = 2.0, 10
 RISE_SHARE = 0.25     # the rise starts where a series first covers this share of base -> peak
 # Google has not settled the last two days of a daily series: they come back as 0 and
@@ -97,7 +97,7 @@ MIN_BASE_POINTS = 3        # fewer than this before first_seen → no baseline t
 def _variant_series(keyword: str, first_seen: date, today: date,
                     after_days: int) -> list[tuple[date, int]] | None:
     """The variant's series sliced to [first_seen-BEFORE_DAYS, window end], via
-    one free trends call on the smallest daily range covering it. None when the
+    one trends call on the smallest daily range covering it. None when the
     fetched series can't honestly carry the window (coarser-than-daily points,
     or the window is entirely outside the reachable range)."""
     start = first_seen - timedelta(days=BEFORE_DAYS)
