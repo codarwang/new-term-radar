@@ -24,9 +24,11 @@ DEFAULTS = {
     # room leads leave); ~3 Trends tasks per call at ~$0.0035 each keeps the
     # daily review spend under half a dollar while the backlog drains
     "review": {"after_days": 14, "per_day": 40},
+    # cpc: per-kept-row /ideas/ exact-match lookup for the Ads bid (free
+    # lane, ~5cr/row on the gift pool) — false leaves demand_keywords.cpc null
     "usecases": {"per_day": 5, "model": "claude-sonnet-4-6", "min_volume": 50, "trends_max": 10, "recheck_days": 3,
                  "location_code": 2840, "benchmark": "gpts", "min_daily": 300, "related": True, "related_geo": "US",
-                 "country_trends": True, "country_min_volume": 1000, "country_max": 8},
+                 "country_trends": True, "country_min_volume": 1000, "country_max": 8, "cpc": True},
     "competition": {"max_rows": 8, "weak_dr": 30, "location_code": 2840},
     "revenue": {"weekday": 0, "pages_growth": 3, "pages_new": 3, "min_revenue_usd": 500, "category": "", "max_leads": 10},
     "asks": {"weekday": 0, "time": "week", "min_score": 2, "model": "gpt-4.1-mini", "min_volume": 50, "max_leads": 12,

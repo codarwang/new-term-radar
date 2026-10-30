@@ -57,7 +57,7 @@ def _assess_web(picked: list[dict], c: dict) -> list[str]:
         if audit is None:
             try:
                 audit = webtool.kd(r["phrase"], datasrc._gl(c["location_code"]))
-            except webtool.PoolExhausted:
+            except (webtool.PoolExhausted, webtool.WalletSpend):
                 raise   # the shared pool is dead — stop, don't fake rows
             except webtool.WebToolError as exc:
                 errors.append(f"{r['phrase']}: {exc}")

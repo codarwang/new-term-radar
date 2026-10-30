@@ -28,8 +28,8 @@ def main() -> int:
                 a = webtool.kd(kw, "us")
                 if isinstance(a.get("score"), (int, float)):
                     sets.append(f"kd = {round(float(a['score']), 2)}")
-            except webtool.PoolExhausted as exc:
-                print(f"# pool exhausted — stopping: {exc}", file=sys.stderr)
+            except (webtool.PoolExhausted, webtool.WalletSpend) as exc:
+                print(f"# pool/wallet guard — stopping: {exc}", file=sys.stderr)
                 dead = True
             except webtool.WebToolError as exc:
                 print(f"  {kw}: kd: {exc}", file=sys.stderr)
@@ -38,8 +38,8 @@ def main() -> int:
                 x = webtool.ideas(kw, "us")
                 if x and isinstance(x.get("cpc"), (int, float)):
                     sets.append(f"cpc = {round(float(x['cpc']), 2)}")
-            except webtool.PoolExhausted as exc:
-                print(f"# pool exhausted — stopping: {exc}", file=sys.stderr)
+            except (webtool.PoolExhausted, webtool.WalletSpend) as exc:
+                print(f"# pool/wallet guard — stopping: {exc}", file=sys.stderr)
                 dead = True
             except webtool.WebToolError as exc:
                 print(f"  {kw}: ideas: {exc}", file=sys.stderr)

@@ -168,6 +168,7 @@ T = {
     "uc_geo_err": ("Country series failed, worldwide data used instead: {names}.", "国家数据获取失败,已退回全球数据:{names}。"),
     "uc_series_err": ("Trends series failed for: {names}.", "搜索趋势曲线获取失败:{names}。"),
     "uc_vol_err": ("Volume/difficulty audit failed for: {names}.", "词量/难度审计失败:{names}。"),
+    "uc_cpc_err": ("CPC lookup failed for: {names}.", "CPC 查询失败:{names}。"),
     "uc_said_h": ("What people said (the evidence for each generic term):", "原话(每个通用词的依据):"),
     "uc_none": ("Nothing to read today: no new name, and none due for its second reading.", "今天没有要读的名字:没有新名字,也没有到第二次阅读时间的。"),
     "uc_no_evidence": ("No posts or README found for: {names}.", "没找到帖子或 README:{names}。"),

@@ -365,6 +365,8 @@ def keyword_table(cfg: dict, uc: dict) -> list[str]:
         lines.append(t("uc_series_err", names="; ".join(uc["series_errors"])))
     if uc.get("volume_errors"):
         lines.append(t("uc_vol_err", names="; ".join(uc["volume_errors"])))
+    if uc.get("cpc_errors"):
+        lines.append(t("uc_cpc_err", names="; ".join(uc["cpc_errors"])))
     if any(r.get("source") == "searched" for r in uc["rows"]):
         lines.append(t("uc_searched_note"))
     said = [f"- **{r['phrase']}** ({', '.join(r['names'])}): “{_cell(r['evidence'])}”" for r in uc["rows"]

@@ -279,7 +279,7 @@ def volumes(phrases: list[str], location_code: int) -> tuple[dict[str, dict], in
     for p in phrases:
         try:
             a = webtool.kd(p, gl)
-        except webtool.PoolExhausted:
+        except (webtool.PoolExhausted, webtool.WalletSpend):
             raise   # the shared pool is dead — stop, don't fake a thin table
         except webtool.WebToolError as exc:
             errors.append(f"{p}: {exc}")
@@ -302,8 +302,8 @@ def fill_cpc(rows: list[dict], location_code: int) -> list[str]:
             continue
         try:
             x = webtool.ideas(r["phrase"], gl)
-        except webtool.PoolExhausted:
-            raise   # the shared pool is dead — stop, don't half-fill a table
+        except (webtool.PoolExhausted, webtool.WalletSpend):
+            raise   # dead pool or real money moved — stop, don't half-fill a table
         except webtool.WebToolError as exc:
             errors.append(f"{r['phrase']}: {exc}")
             continue
@@ -380,7 +380,7 @@ def country_series(rows: list[dict], c: dict) -> tuple[dict[str, list], int, lis
         try:
             # the browser tool's own geo series (30d), settled daily
             return phrase, (webtool.series(phrase, c["related_geo"], "30d"), 0), ""
-        except webtool.PoolExhausted:
+        except (webtool.PoolExhausted, webtool.WalletSpend):
             raise   # the shared pool is dead — fail the stage, don't fake flat
         except webtool.WebToolError as exc:
             return phrase, ([], 0), str(exc)
@@ -466,7 +466,7 @@ def fetch_series(keywords: list[str], benchmark: str, today: date) -> tuple[dict
     for k in keywords:
         try:
             out[k] = webtool.pair_series(k, benchmark, range="90d", geo="")
-        except webtool.PoolExhausted:
+        except (webtool.PoolExhausted, webtool.WalletSpend):
             raise   # the shared pool is dead — stop, don't judge half the set
         except webtool.WebToolError as exc:
             # a word with no curve is honestly "no data" — skip it, don't
@@ -537,7 +537,7 @@ def run(cfg: dict, state: Path, names: list[str], repos: dict[str, str], today: 
         if use_related:
             try:
                 related = webtool.related_queries(name, c["related_geo"])
-            except webtool.PoolExhausted:
+            except (webtool.PoolExhausted, webtool.WalletSpend):
                 raise   # the shared pool is dead — stop, don't degrade silently
             except webtool.WebToolError as exc:
                 related = {}

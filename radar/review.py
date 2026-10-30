@@ -199,7 +199,7 @@ def review(cfg: dict, conn: sqlite3.Connection, today: date | None = None) -> di
         for k in keys:
             try:
                 pts = _variant_series(k, first_seen, today, c["after_days"])
-            except webtool.PoolExhausted:
+            except (webtool.PoolExhausted, webtool.WalletSpend):
                 raise   # the shared pool is dead — stop the run, don't judge
             except webtool.WebToolError as exc:
                 errors.append(f"{term} ({k}): {exc}")
